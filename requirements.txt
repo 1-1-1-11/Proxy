@@ -1,0 +1,5 @@
+# Direct dependencies verified on Windows with Python 3.13.4.
+# Python >= 3.11 is required by asyncio.timeout.
+psutil==7.2.2
+PyYAML==6.0.3
+playwright==1.59.0

@@ -1,0 +1,75 @@
+﻿Claude 代理检查 2026.10.06.6
+
+claude-proxy
+  只读检查当前目录设置、实时内核/端口/策略、双出口及 Claude 真实连接。
+  每个正在运行的 Claude CLI / VS Code 实例分别核验；空闲实例没有请求证据时
+  返回 INCOMPLETE / 3，不把一个实例通过当作全部实例通过。
+  不启动 Clash、不修复配置、不切节点、不读取旧报告充当当前证据。
+
+claude-proxy -Full
+  另启动临时未登录 Chrome，检查网页出口、原生 WebRTC 和 DNS。
+  WebRTC 读取 Chrome 实际生效的策略和来源，确认无 URL 特例；执行独立 Python
+  STUN 正对照、浏览器原生 ICE，并匹配测试浏览器进程的 UDP 源端口与 Mihomo 记录。
+  STUN 不可达、ICE 未完成、策略/连接读取失败均不会通过，零候选本身不能证明安全。
+  Python STUN 正对照可能使用日常出口；它用于证明确实能收到 STUN 响应，
+  与浏览器候选或浏览器泄漏分开列出。测试不是未来全部 UDP 流量的保证。
+  当前实现要求实际策略来源包含 managed 且无 URL 特例，才能将临时测试的保护
+  适用于已有专用资料。不会自动写入或删除 Chrome 全局策略。
+  DNS 使用 BrowserLeaks 动态页面；必须在同次观察中看到 #dns-test 的加载标志
+  开始并结束，并核对非空表格与摘要。结果数量不代表任务数量；完成及地域观察
+  不等于证明系统不存在其他 DNS 路径。缺少可靠完成证据时仍报告未知。
+  临时资料与登录资料分开，关闭后清理；完整检查通常约 1 分钟。
+
+claude-proxy -LaunchCheck
+  只检查启动所需的网络及当前项目配置，成功为 LAUNCH_READY / 0。
+  供首次启动或当前没有 Claude 请求时使用，不表示应用真实流量已经验证。
+  不能与 -Full 或 -Repair 同用。桌面 CLI 启动入口使用这一模式。
+
+claude-proxy -Repair
+  显式调用原有代理配置恢复后端，然后重新检查；可能启动/重载 Clash。
+  不修改账号身份或最终出口，不自动修复 Chrome 全局策略、第三方 API 覆盖、
+  供应商故障、物理网络或所有未知项目配置。可加 -Full 做浏览器补测。
+
+claude-proxy -CheckOnly
+  默认检查的兼容别名；不能与 -Repair 合用。
+
+claude-proxy -Workspace "D:\Desktop\test"
+  检查指定项目及祖先配置；默认使用终端当前目录。
+
+claude-proxy -Full -Output "D:\Documents\ChatGPT\Proxy\proxy-audit.json"
+  显式保存脱敏报告。命令行默认不写报告。-Json 只输出 JSON。
+  JSON 中环境变量以 name/value 数组表示，保留大小写；Windows PowerShell 5.1
+  可直接 ConvertFrom-Json，不会因 HTTP_PROXY / http_proxy 同名报错。
+
+桌面入口：
+  代理网络检查：调用 -Full，并覆盖保存
+    %USERPROFILE%\.codex\ClaudeNetwork\reports\desktop-last-check.json。
+  Claude 专用浏览器 / Claude 打开授权链接：先做固定出口、实际 WebRTC 防护检查，
+    只有必要项全通过才打开目标网页。缺证据即停止，不以 HTTP 预检替代 UDP 防护。
+  Claude CLI 固定出口：启动条件通过后，启动现有官方 Claude CLI。
+  四个快捷方式已恢复原工作目录 D:\Desktop\test；后续部署默认保留工作目录。
+  专用浏览器已禁用 MediaRouter 投屏发现，避免局域网 Cast TCP 8009 绕过 HTTP 代理。
+  此限制仅写入专用浏览器启动参数，不改普通 Chrome 或全局投屏策略。
+  不自动关闭已有专用浏览器；已有启动参数不兼容时，需要关闭后重新打开。
+
+结果和退出码：
+  CLAUDE_OBSERVED / 0：本模式必要检查通过，本次运行中的 Claude 实例均已关联请求。
+    浏览器 TCP 与临时 UDP 测试另列，不能理解为全机或所有未来流量已验证。
+  LAUNCH_READY / 0：仅启动条件满足。
+  PROXY_READY / 0：内部网络预检通过，仅供启动门禁/守护程序调用。
+  NOT_READY / 2：存在明确错误。
+  INCOMPLETE / 3：必要检查或应用实际请求证据不足。
+  网络、Claude、专用浏览器 TCP、临时浏览器 UDP 分项列出；未运行不改写成已通过。
+
+关闭 Clash 窗口、退出界面和停止 Mihomo 服务不同。界面未运行但服务仍正常
+工作时可以网络就绪；内核或监听停止则不能通过，默认命令也不会悄悄启动它。
+
+边界：
+  不输出或另存密码/token，不读 Cookie，不登录或调用模型；配置凭据仅在内存比较。
+  不主动中断真实代理做故障注入；重启、断网恢复、长期稳定未由短测证明。
+  不保证账号权益、地区资格、免封禁或供应商永久静态 IP。
+  任意工具、MCP、WSL、SSH 和普通浏览器不属于全流量统一出口保证。
+
+实现位置：%USERPROFILE%\.codex\ClaudeNetwork
+非敏感策略：audit_policy.json
+源码与回归测试：D:\Documents\ChatGPT\Proxy\claude-network

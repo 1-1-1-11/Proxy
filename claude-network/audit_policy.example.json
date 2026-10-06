@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "expected_ip": "203.0.113.10",
+  "entry_port": 17892,
+  "daily_port": 7892,
+  "fixed_group": "Claude-固定出口",
+  "chain_group": "静态出口-自动恢复",
+  "provider": "固定出口链路"
+}
