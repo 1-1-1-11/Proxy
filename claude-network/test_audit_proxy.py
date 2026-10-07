@@ -2,6 +2,7 @@
 import contextlib
 import copy
 import io
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -221,7 +222,7 @@ class ApplicationEvidenceTests(OfflineCase):
         policy, snap, *_ = fixture()
         checks = audit.applications(policy, snap, [])
         self.assertEqual({c['status'] for c in checks}, {'not_running'})
-        ready = audit.summarize(audit.evaluate_path(*fixture()) + checks)
+        ready = audit.summarize(audit.evaluate_path(*fixture()) + checks, mode='runtime_check')
         self.assertFalse(ready['ready'])
         self.assertEqual(ready['exit_code'], 3)
         self.assertEqual(ready['network_state'], 'READY')
@@ -254,7 +255,7 @@ class ApplicationEvidenceTests(OfflineCase):
         self.assertEqual(indexed['claude_pid_20']['status'], 'pass')
         self.assertEqual(indexed['claude_pid_21']['status'], 'not_tested')
         self.assertEqual(indexed['claude_runtime']['status'], 'partial')
-        summary = audit.summarize(audit.evaluate_path(*fixture()) + checks)
+        summary = audit.summarize(audit.evaluate_path(*fixture()) + checks, mode='runtime_check')
         self.assertEqual(summary['claude_state'], 'PARTIAL')
         self.assertEqual(summary['exit_code'], 3)
 
@@ -267,7 +268,7 @@ class ApplicationEvidenceTests(OfflineCase):
         checks = audit.applications(policy, snap, [connection_record(policy), connection_record(policy, source=50002)])
         self.assertEqual(by_id(checks)['claude_runtime']['status'], 'pass')
         self.assertEqual({r['pid'] for r in by_id(checks)['claude_runtime']['evidence']['observed']}, {20, 21})
-        summary = audit.summarize(audit.evaluate_path(*fixture()) + checks)
+        summary = audit.summarize(audit.evaluate_path(*fixture()) + checks, mode='runtime_check')
         self.assertEqual(summary['state'], 'CLAUDE_OBSERVED')
         self.assertEqual(summary['claude_state'], 'OBSERVED')
         self.assertEqual(summary['browser_state'], 'NOT_RUNNING')
@@ -375,8 +376,13 @@ class ApplicationEvidenceTests(OfflineCase):
 class SummaryAndCommandTests(OfflineCase):
     def test_audit_launch_and_preflight_modes_have_distinct_acceptance(self):
         checks = audit.evaluate_path(*fixture())
-        self.assertEqual(audit.summarize(checks)['exit_code'], 3)
-        self.assertEqual(audit.summarize(checks)['network_state'], 'READY')
+        normal = audit.summarize(checks)
+        self.assertEqual(normal['state'], 'ENVIRONMENT_READY')
+        self.assertEqual(normal['exit_code'], 0)
+        self.assertEqual(normal['network_state'], 'READY')
+        self.assertEqual(normal['cli_launch_state'], 'READY')
+        self.assertEqual(normal['browser_launch_state'], 'NOT_CHECKED')
+        self.assertEqual(audit.summarize(checks, mode='runtime_check')['exit_code'], 3)
         self.assertEqual(audit.summarize(checks, mode='preflight')['state'], 'PROXY_READY')
         launch = audit.summarize(checks, mode='launch_check')
         self.assertEqual(launch['state'], 'LAUNCH_READY')
@@ -385,6 +391,93 @@ class SummaryAndCommandTests(OfflineCase):
         self.assertFalse(launch['applications_observed'])
         checks.append(audit.item('settings', 'settings', 'unknown', '', required=True, category='configuration'))
         self.assertEqual(audit.summarize(checks, mode='launch_check')['exit_code'], 3)
+
+    def test_environment_checks_do_not_require_claude_to_be_started_or_busy(self):
+        for idle in (False, True):
+            for mode in ('check', 'full_check'):
+                with self.subTest(idle=idle, mode=mode):
+                    policy, snap, *_ = fixture()
+                    if idle:
+                        snap['process']['items'].append({'pid': 20, 'name': 'claude.exe'})
+                    checks = audit.evaluate_path(*fixture()) + audit.applications(policy, snap, [])
+                    checks.append(audit.item('settings_ok', '设置', 'pass', '',
+                                             required=True, category='configuration'))
+                    if mode == 'full_check':
+                        checks.extend(audit.item(identifier, identifier, 'pass', '', required=identifier != 'browser_dns',
+                                                 category='browser_test')
+                                      for identifier in ('browser_fixed_exit', 'browser_webrtc', 'browser_dns'))
+                    report = audit.summarize(checks, mode=mode)
+                    self.assertEqual(report['state'], 'ENVIRONMENT_READY')
+                    self.assertEqual(report['exit_code'], 0)
+                    self.assertTrue(report['ready'])
+                    self.assertEqual(report['cli_launch_state'], 'READY')
+                    self.assertEqual(report['browser_launch_state'],
+                                     'READY' if mode == 'full_check' else 'NOT_CHECKED')
+                    self.assertEqual(report['claude_state'], 'NOT_OBSERVED' if idle else 'NOT_RUNNING')
+                    self.assertFalse(report['applications_observed'])
+                    self.assertFalse(report['blocking_checks'])
+
+    def test_explicit_runtime_modes_still_reject_idle_claude(self):
+        policy, snap, *_ = fixture()
+        snap['process']['items'].append({'pid': 20, 'name': 'claude.exe'})
+        checks = audit.evaluate_path(*fixture()) + audit.applications(policy, snap, [])
+        checks.extend(audit.item(identifier, identifier, 'pass', '', required=identifier != 'browser_dns',
+                                 category='browser_test')
+                      for identifier in ('browser_fixed_exit', 'browser_webrtc', 'browser_dns'))
+        for mode in ('runtime_check', 'runtime_full_check'):
+            with self.subTest(mode=mode):
+                report = audit.summarize(checks, mode=mode)
+                self.assertEqual(report['state'], 'INCOMPLETE')
+                self.assertEqual(report['exit_code'], 3)
+                self.assertEqual(report['cli_launch_state'], 'READY')
+                self.assertEqual(report['claude_state'], 'NOT_OBSERVED')
+                self.assertFalse(report['ready'])
+                self.assertFalse(report['applications_observed'])
+                self.assertIn('claude_runtime', json.dumps(report['blocking_checks']))
+
+    def test_full_webrtc_unknown_blocks_browser_without_blocking_cli_launch(self):
+        checks = audit.evaluate_path(*fixture()) + [
+            audit.item('settings_ok', '设置', 'pass', '', required=True, category='configuration'),
+            audit.item('browser_fixed_exit', '浏览器出口', 'pass', '', required=True, category='browser_test'),
+            audit.item('browser_webrtc', 'WebRTC', 'unknown', 'BLOCKER_WEBRTC_UNAVAILABLE',
+                       required=True, category='browser_test')]
+        report = audit.summarize(checks, mode='full_check')
+        self.assertEqual(report['state'], 'INCOMPLETE')
+        self.assertEqual(report['exit_code'], 3)
+        self.assertFalse(report['ready'])
+        self.assertEqual(report['cli_launch_state'], 'READY')
+        self.assertEqual(report['browser_launch_state'], 'INCOMPLETE')
+        self.assertIn('browser_webrtc', json.dumps(report['blocking_checks']))
+
+    def test_full_respects_real_browser_result_contract_with_optional_dns(self):
+        import audit_browser
+        checks = audit.evaluate_path(*fixture()) + [
+            audit_browser._result(identifier, 'pass', '真实结果工厂测试')
+            for identifier in ('browser_fixed_exit', 'browser_webrtc', 'browser_dns')]
+        self.assertFalse(by_id(checks)['browser_dns']['required'])
+        report = audit.summarize(checks, mode='full_check')
+        self.assertEqual(report['state'], 'ENVIRONMENT_READY')
+        self.assertEqual(report['browser_launch_state'], 'READY')
+        self.assertFalse(report['blocking_checks'])
+
+    def test_core_and_required_configuration_problems_block_environment_readiness(self):
+        for failure, status in (('core', 'fail'), ('configuration', 'fail'), ('configuration', 'unknown')):
+            with self.subTest(failure=failure, status=status):
+                data = list(fixture())
+                if failure == 'core':
+                    data[1]['process']['items'] = []
+                    data[1]['tcp']['listeners'] = []
+                checks = audit.evaluate_path(*data)
+                if failure == 'configuration':
+                    checks.append(audit.item('settings_wrong_proxy', '代理设置', status, '入口配置不符合要求或未能读取',
+                                             required=True, category='configuration'))
+                report = audit.summarize(checks)
+                self.assertEqual(report['state'], 'NOT_READY' if status == 'fail' else 'INCOMPLETE')
+                self.assertEqual(report['exit_code'], 2 if status == 'fail' else 3)
+                self.assertEqual(report['cli_launch_state'], 'NOT_READY' if status == 'fail' else 'INCOMPLETE')
+                self.assertFalse(report['ready'])
+                self.assertIn('mihomo_core' if failure == 'core' else 'settings_wrong_proxy',
+                              json.dumps(report['blocking_checks']))
 
     def test_application_tcp_and_controller_are_sampled_concurrently(self):
         _, snap, *_ = fixture()
@@ -449,12 +542,33 @@ class SummaryAndCommandTests(OfflineCase):
         self.spawn.assert_not_called()
 
     def test_launch_check_argument_selects_launch_mode_without_repair(self):
+        signature = inspect.signature(audit.collect)
         with mock.patch.object(sys, 'argv', ['audit_proxy.py', '--launch-check', '--json']), \
                 mock.patch.object(audit, 'collect', return_value={'exit_code': 0}) as collect, \
                 mock.patch.object(audit, 'run') as run, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(audit.main(), 0)
-        self.assertEqual(collect.call_args.args[2:], (False, False, True))
+        actual = signature.bind(*collect.call_args.args, **collect.call_args.kwargs)
+        actual.apply_defaults()
+        self.assertFalse(actual.arguments['full'])
+        self.assertFalse(actual.arguments['preflight'])
+        self.assertTrue(actual.arguments['launch_check'])
+        self.assertFalse(actual.arguments['runtime'])
+        run.assert_not_called()
+
+    def test_runtime_and_full_arguments_can_be_combined_without_repair(self):
+        signature = inspect.signature(audit.collect)
+        with mock.patch.object(sys, 'argv', ['audit_proxy.py', '--runtime', '--full', '--json']), \
+                mock.patch.object(audit, 'collect', return_value={'exit_code': 3}) as collect, \
+                mock.patch.object(audit, 'run') as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.main(), 3)
+        actual = signature.bind(*collect.call_args.args, **collect.call_args.kwargs)
+        actual.apply_defaults()
+        self.assertTrue(actual.arguments['runtime'])
+        self.assertTrue(actual.arguments['full'])
+        self.assertFalse(actual.arguments['launch_check'])
+        self.assertFalse(actual.arguments['preflight'])
         run.assert_not_called()
 
     def test_no_required_checks_is_incomplete(self):
@@ -478,6 +592,7 @@ class SummaryAndCommandTests(OfflineCase):
 
     def test_default_main_does_not_repair_launch_or_write(self):
         report = {'exit_code': 3, 'ready': False, 'state': 'INCOMPLETE'}
+        signature = inspect.signature(audit.collect)
         with mock.patch.object(sys, 'argv', ['audit_proxy.py']), \
                 mock.patch.object(audit, 'collect', return_value=report) as collect, \
                 mock.patch.object(audit, 'display') as display, \
@@ -486,8 +601,14 @@ class SummaryAndCommandTests(OfflineCase):
                 mock.patch.object(Path, 'mkdir') as mkdir:
             self.assertEqual(audit.main(), 3)
         collect.assert_called_once()
-        self.assertEqual(collect.call_args.args[2:], (False, False, False))
-        display.assert_called_once_with(report)
+        actual = signature.bind(*collect.call_args.args, **collect.call_args.kwargs)
+        actual.apply_defaults()
+        for option in ('full', 'preflight', 'launch_check', 'runtime'):
+            self.assertFalse(actual.arguments[option])
+        display.assert_called_once()
+        self.assertIs(display.call_args.args[0], report)
+        self.assertFalse(display.call_args.kwargs.get('details',
+                         display.call_args.args[1] if len(display.call_args.args) > 1 else False))
         run.assert_not_called()
         write.assert_not_called()
         mkdir.assert_not_called()
@@ -511,9 +632,12 @@ class SummaryAndCommandTests(OfflineCase):
             report = audit.collect(Path('unused'))
         self.assertTrue(report['read_only'])
         self.assertEqual(report['mode'], 'check')
-        self.assertFalse(report['ready'])
+        self.assertTrue(report['ready'])
+        self.assertEqual(report['state'], 'ENVIRONMENT_READY')
         self.assertEqual(report['network_state'], 'READY')
-        self.assertEqual(report['exit_code'], 3)
+        self.assertEqual(report['cli_launch_state'], 'READY')
+        self.assertEqual(report['browser_launch_state'], 'NOT_CHECKED')
+        self.assertEqual(report['exit_code'], 0)
         self.assertFalse(report['applications_observed'])
         sample.assert_called_once_with(Path('unused'))
         write.assert_not_called()
@@ -521,6 +645,36 @@ class SummaryAndCommandTests(OfflineCase):
         self.spawn.assert_not_called()
         self.socket.assert_not_called()
         self.https.assert_not_called()
+
+    def test_runtime_full_collect_keeps_idle_instance_requirement_with_browser_pass(self):
+        policy, snap, ctl, disk, probes, route = fixture()
+        snap['process']['items'].append({'pid': 20, 'name': 'claude.exe'})
+        settings = types.ModuleType('audit_settings')
+        settings.audit_settings = mock.Mock(return_value=[])
+        browser = types.ModuleType('audit_browser')
+        browser.browser_audit = mock.Mock(return_value=[
+            audit.item(identifier, identifier, 'pass', '', required=identifier != 'browser_dns', category='browser_test')
+            for identifier in ('browser_fixed_exit', 'browser_webrtc', 'browser_dns')])
+        with mock.patch.object(audit, 'load_policy', return_value=policy), \
+                mock.patch.object(audit, 'snapshot', return_value=snap), \
+                mock.patch.object(audit, 'controller', return_value=ctl), \
+                mock.patch.object(audit, 'disk_structure', return_value=disk), \
+                mock.patch.object(audit, 'probe', side_effect=lambda port, url:
+                    probes[1] if 'ipify' in url else probes[0]), \
+                mock.patch.object(audit, 'route_probe', return_value=route), \
+                mock.patch.object(audit, 'application_sample', return_value=(snap, [])), \
+                mock.patch.dict(sys.modules, {'audit_settings': settings, 'audit_browser': browser}), \
+                mock.patch.object(Path, 'write_text') as write:
+            report = audit.collect(Path('unused'), full=True, runtime=True)
+        self.assertEqual(report['mode'], 'runtime_full_check')
+        self.assertEqual(report['state'], 'INCOMPLETE')
+        self.assertEqual(report['exit_code'], 3)
+        self.assertEqual(report['cli_launch_state'], 'READY')
+        self.assertEqual(report['browser_launch_state'], 'READY')
+        self.assertFalse(report['applications_observed'])
+        self.assertIn('claude_runtime', json.dumps(report['blocking_checks']))
+        browser.browser_audit.assert_called_once()
+        write.assert_not_called()
 
     def test_collect_uses_fresh_application_sample_after_settings_work(self):
         policy, initial, ctl, disk, probes, route = fixture()
@@ -599,6 +753,47 @@ class SummaryAndCommandTests(OfflineCase):
         self.assertFalse(report['ready'])
         self.assertEqual(report['error'], 'PermissionError')
         self.spawn.assert_not_called()
+
+
+class ConsoleOutputTests(OfflineCase):
+    def make_report(self, checks, mode='check'):
+        return {'started_at': '2026-10-07T09:00:00+09:00', 'workspace': 'test-workspace',
+                'mode': mode, 'checks': checks, 'limitations': ['TEST_SCOPE_LIMIT'],
+                **audit.summarize(checks, mode=mode)}
+
+    def test_default_output_is_compact_and_details_preserve_optional_evidence(self):
+        policy, snap, *_ = fixture()
+        checks = audit.evaluate_path(*fixture()) + audit.applications(policy, snap, [])
+        checks += [audit.item('optional_' + str(index), 'OPTIONAL_TITLE_' + str(index),
+                              'not_tested', 'OPTIONAL_DETAIL_' + str(index)) for index in range(30)]
+        report = self.make_report(checks)
+        with contextlib.redirect_stdout(io.StringIO()) as compact:
+            audit.display(report)
+        with contextlib.redirect_stdout(io.StringIO()) as expanded:
+            audit.display(report, details=True)
+        brief, details = compact.getvalue(), expanded.getvalue()
+        self.assertEqual(report['state'], 'ENVIRONMENT_READY')
+        self.assertNotIn('OPTIONAL_DETAIL_0', brief)
+        self.assertIn('OPTIONAL_DETAIL_0', details)
+        self.assertIn('OPTIONAL_DETAIL_29', details)
+        self.assertLess(len(brief.splitlines()), len(details.splitlines()))
+        for premature_request in ('先启动 Claude', '先打开 Claude', '逐实例 Claude 实际流量证据不足'):
+            self.assertNotIn(premature_request, brief)
+        self.assertNotIn('检查不完整', brief)
+
+    def test_compact_output_still_explains_required_browser_blocker(self):
+        checks = audit.evaluate_path(*fixture()) + [
+            audit.item('browser_fixed_exit', '浏览器出口', 'pass', '', required=True, category='browser_test'),
+            audit.item('browser_webrtc', 'WebRTC', 'unknown', 'BLOCKER_WEBRTC_UNAVAILABLE',
+                       required=True, category='browser_test')]
+        report = self.make_report(checks, mode='full_check')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            audit.display(report)
+        self.assertEqual(report['cli_launch_state'], 'READY')
+        self.assertEqual(report['browser_launch_state'], 'INCOMPLETE')
+        self.assertIn('WebRTC', output.getvalue())
+        self.assertIn('BLOCKER_WEBRTC_UNAVAILABLE', output.getvalue())
+        self.assertNotIn('先启动 Claude', output.getvalue())
 
 
 if __name__ == '__main__':
