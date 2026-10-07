@@ -1,13 +1,27 @@
-﻿Claude 代理检查 2026.10.06.6
+﻿Claude 代理检查 2026.10.07.1
 
 claude-proxy
-  只读检查当前目录设置、实时内核/端口/策略、双出口及 Claude 真实连接。
-  每个正在运行的 Claude CLI / VS Code 实例分别核验；空闲实例没有请求证据时
-  返回 INCOMPLETE / 3，不把一个实例通过当作全部实例通过。
+  使用前的只读环境检查：当前目录设置、实时内核/端口/策略及双出口。
+  不需要先打开 Claude。必要项通过为 ENVIRONMENT_READY / 0，可以启动 CLI。
+  Claude 未运行或暂时没有请求不是预检错误，也不会因此返回 INCOMPLETE。
+  默认输出简短结论、受影响的使用入口和下一步；需要逐项证据时加 -Details。
+  默认模式不包含浏览器保护补测；使用专用浏览器前可运行 -Full。
   不启动 Clash、不修复配置、不切节点、不读取旧报告充当当前证据。
+  正常终端检查结束后可选择：R 查看修复方案、D 查看详情、C 重新检查、Q 结束。
+  修复方案说明能恢复哪些受管理配置、会改什么、不能处理什么；查看方案不等于执行。
+  输入方案编号后显示具体影响；只有再输入 YES 才执行，其他输入取消。
+  方案一恢复原受管理代理配置，可能启动/重载 Clash，原后端保存 DPAPI 文件备份。
+  方案二在适用时备份并设置当前用户 Chrome 的单个 WebRTC 策略值，影响该用户
+  所有 Chrome 资料和音视频通话；不动机器级策略或 URL 特例，提供单值回滚命令。
+  已有正确策略但实际来源未知时，不重复写入冒充修复；会说明需重检或进一步诊断。
+  执行后自动重检；备份失败不写策略，回滚不覆盖后续其他修改。
 
 claude-proxy -Full
   另启动临时未登录 Chrome，检查网页出口、原生 WebRTC 和 DNS。
+  不启动 Claude，不读取登录资料；必要项全部通过即可启动 CLI 和专用浏览器。
+  浏览器必要证据不足仍返回 INCOMPLETE / 3，不把未知改成通过。
+  若 CLI 条件已通过而仅浏览器保护未确认，会分别提示 CLI 可启动、
+  专用浏览器暂不要启动；按输出中的原因处理后重查。
   WebRTC 读取 Chrome 实际生效的策略和来源，确认无 URL 特例；执行独立 Python
   STUN 正对照、浏览器原生 ICE，并匹配测试浏览器进程的 UDP 源端口与 Mihomo 记录。
   STUN 不可达、ICE 未完成、策略/连接读取失败均不会通过，零候选本身不能证明安全。
@@ -20,18 +34,32 @@ claude-proxy -Full
   不等于证明系统不存在其他 DNS 路径。缺少可靠完成证据时仍报告未知。
   临时资料与登录资料分开，关闭后清理；完整检查通常约 1 分钟。
 
+claude-proxy -Runtime
+  可选的启动后检查，不是使用前检查的前提，也不会替你启动应用。
+  在自己打开 Claude 并产生请求后，逐个核验运行中的 CLI / VS Code 实例，
+  将实际 TCP 连接与 Mihomo 请求及固定出口链路对应。
+  没有运行实例，或有实例空闲、缺少请求证据时，返回 INCOMPLETE / 3。
+  可以与 -Full、-Details 同用；不能与 -LaunchCheck 或 -Repair 同用。
+
+claude-proxy -Details
+  显示逐项检查和详细证据，不改变通过标准。可与 -Full 或 -Runtime 同用。
+
+claude-proxy -NoPrompt
+  禁用交互菜单，适合脚本调用。-Json 自动不交互；不会等待输入或自动修复。
+
 claude-proxy -LaunchCheck
   只检查启动所需的网络及当前项目配置，成功为 LAUNCH_READY / 0。
-  供首次启动或当前没有 Claude 请求时使用，不表示应用真实流量已经验证。
-  不能与 -Full 或 -Repair 同用。桌面 CLI 启动入口使用这一模式。
+  供桌面 CLI 启动入口使用，不表示应用真实流量已经验证。
+  不能与 -Full、-Runtime 或 -Repair 同用。日常使用前直接运行默认命令即可。
 
 claude-proxy -Repair
   显式调用原有代理配置恢复后端，然后重新检查；可能启动/重载 Clash。
   不修改账号身份或最终出口，不自动修复 Chrome 全局策略、第三方 API 覆盖、
   供应商故障、物理网络或所有未知项目配置。可加 -Full 做浏览器补测。
+  不能与 -Runtime 同用；并非所有失败都应执行修复，先看当前检查给出的原因。
 
 claude-proxy -CheckOnly
-  默认检查的兼容别名；不能与 -Repair 合用。
+  默认检查的非交互只读兼容别名；不能与 -Repair 合用。
 
 claude-proxy -Workspace "D:\Desktop\test"
   检查指定项目及祖先配置；默认使用终端当前目录。
@@ -40,6 +68,7 @@ claude-proxy -Full -Output "D:\Documents\ChatGPT\Proxy\proxy-audit.json"
   显式保存脱敏报告。命令行默认不写报告。-Json 只输出 JSON。
   JSON 中环境变量以 name/value 数组表示，保留大小写；Windows PowerShell 5.1
   可直接 ConvertFrom-Json，不会因 HTTP_PROXY / http_proxy 同名报错。
+  当前报告 schema 为 4；-Details 只影响文字输出，-Json 保留完整结构化证据。
 
 桌面入口：
   代理网络检查：调用 -Full，并覆盖保存
@@ -53,13 +82,16 @@ claude-proxy -Full -Output "D:\Documents\ChatGPT\Proxy\proxy-audit.json"
   不自动关闭已有专用浏览器；已有启动参数不兼容时，需要关闭后重新打开。
 
 结果和退出码：
-  CLAUDE_OBSERVED / 0：本模式必要检查通过，本次运行中的 Claude 实例均已关联请求。
-    浏览器 TCP 与临时 UDP 测试另列，不能理解为全机或所有未来流量已验证。
+  ENVIRONMENT_READY / 0：本模式的使用前必要检查通过，可以启动对应入口。
+    默认模式验证 CLI 条件；-Full 还要求浏览器必要保护通过。
+  CLAUDE_OBSERVED / 0：仅 -Runtime 使用；必要检查通过，运行中的 Claude
+    实例均已关联真实请求，不代表全机或所有未来流量已验证。
   LAUNCH_READY / 0：仅启动条件满足。
   PROXY_READY / 0：内部网络预检通过，仅供启动门禁/守护程序调用。
   NOT_READY / 2：存在明确错误。
-  INCOMPLETE / 3：必要检查或应用实际请求证据不足。
-  网络、Claude、专用浏览器 TCP、临时浏览器 UDP 分项列出；未运行不改写成已通过。
+  INCOMPLETE / 3：本模式的必要证据不足；只有 -Runtime 要求应用实际请求证据。
+  默认预检不把未运行误判为错误，也不声称已验证应用请求。
+  网络、CLI 条件和浏览器保护分别报告；CLI 就绪不能替代浏览器必要保护。
 
 关闭 Clash 窗口、退出界面和停止 Mihomo 服务不同。界面未运行但服务仍正常
 工作时可以网络就绪；内核或监听停止则不能通过，默认命令也不会悄悄启动它。

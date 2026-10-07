@@ -66,6 +66,15 @@ class PolicyProjectionTests(unittest.TestCase):
             self.assertFalse(projected['url_overrides_empty'])
             self.assertNotIn(CANARY, json.dumps(projected))
 
+    def test_actual_chrome_store_metadata_is_retained_without_private_fields(self):
+        for source in ('command_line_controlled', 'extension_controlled',
+                       'user_controlled', 'recommended', 'managed_by_custodian'):
+            raw = prefs()
+            raw['webrtc']['ip_handling_policy']['metadata'] = [source, 'extension_modifiable', CANARY]
+            projected = probe.project_policy(raw)
+            self.assertEqual(projected['sources'], [source, 'extension_modifiable'])
+            self.assertNotIn(CANARY, json.dumps(projected))
+
 
 class ClassificationTests(unittest.TestCase):
     def test_valid_managed_policy_completed_ice_control_and_no_udp_pass(self):
@@ -80,11 +89,23 @@ class ClassificationTests(unittest.TestCase):
                 self.assertNotEqual(probe.classify(evidence, EXPECTED)[0], 'pass')
 
     def test_cli_or_user_setting_is_not_managed_proof(self):
-        for sources in ([], ['command_line'], ['user_modifiable'], ['extension']):
+        for sources in ([], ['command_line'], ['user_modifiable'], ['extension'],
+                        ['command_line_controlled', 'extension_modifiable'],
+                        ['extension_controlled', 'extension_modifiable'],
+                        ['user_controlled', 'user_modifiable'], ['recommended'],
+                        ['extension_modifiable'], ['managed_by_custodian']):
             evidence = good_evidence()
             evidence['effective_policy']['sources'] = sources
             status, _, reason = probe.classify(evidence, EXPECTED)
             self.assertEqual((status, reason), ('unknown', 'profile_scope_unverified'))
+
+    def test_command_line_control_is_not_described_as_extension_control(self):
+        evidence = good_evidence()
+        evidence['effective_policy']['sources'] = ['command_line_controlled', 'extension_modifiable']
+        status, detail, reason = probe.classify(evidence, EXPECTED)
+        self.assertEqual((status, reason), ('unknown', 'profile_scope_unverified'))
+        self.assertIn('由命令行控制', detail)
+        self.assertNotIn('由扩展控制', detail)
 
     def test_url_override_missing_or_nonempty_cannot_pass(self):
         for flag in (None, False):
@@ -212,6 +233,15 @@ class NativeCheckTests(unittest.TestCase):
         last = {'readable': True, 'records': [{'source_port': 55555, 'destination_port': 3478}]}
         (status, _, evidence), _ = self.run_check(FakePage(), udp=[empty, empty, empty, last])
         self.assertEqual((status, evidence['reason']), ('fail', 'browser_stun_udp_observed'))
+
+    def test_completed_ice_with_only_command_line_policy_remains_unknown(self):
+        raw = prefs()
+        raw['webrtc']['ip_handling_policy']['metadata'] = ['command_line_controlled', 'extension_modifiable']
+        (status, detail, evidence), _ = self.run_check(FakePage(raw_prefs=raw))
+        self.assertEqual((status, evidence['reason']), ('unknown', 'profile_scope_unverified'))
+        self.assertEqual(evidence['effective_policy']['sources'],
+                         ['command_line_controlled', 'extension_modifiable'])
+        self.assertIn('由命令行控制', detail)
 
     def test_positive_control_failure_and_trace_mismatch_are_not_pass(self):
         (status, _, _), _ = self.run_check(FakePage(), control={'ok': False})

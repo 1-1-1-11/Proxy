@@ -5,7 +5,7 @@ $installRoot = 'C:\Users\32299\.codex\ClaudeNetwork'
 $npmTarget = 'C:\Users\32299\AppData\Roaming\npm\claude-proxy.cmd'
 $desktopRoot = 'D:\Desktop'
 $backupRoot = Join-Path $PSScriptRoot ('deployment-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$files = @('stun_probe.py','webrtc_probe.py','audit_policy.json','audit_proxy.py','audit_settings.py','audit_browser.py',
+$files = @('stun_probe.py','webrtc_probe.py','audit_policy.json','audit_proxy.py','audit_actions.py','audit_settings.py','audit_browser.py',
     'network_check.py','browser_entry.py','route_verify.py','repair_proxy.py',
     'ClaudeBrowser.cs','ClaudeBrowser.exe','browser-build.json',
     'Open-ClaudeBrowser.ps1','Repair-ClaudeProxy.ps1','claude-fixed.cmd','Network-Check.cmd','使用说明.txt')
@@ -59,7 +59,7 @@ try {
                 'Claude 专用浏览器.lnk' {$shortcut.Description = '先检查固定出口及实际 WebRTC 保护，证据不足即停止。'}
                 'Claude 打开授权链接.lnk' {$shortcut.Description = '固定出口及实际 WebRTC 保护通过后，在专用浏览器打开剪贴板授权链接。'}
                 'Claude CLI 固定出口.lnk' {$shortcut.Description = '先检查项目设置、真实内核和双出口，再启动官方 Claude CLI。'}
-                '代理网络检查.lnk' {$shortcut.Description = '完整只读检查：实际进程、端口、策略、双出口、配置、WebRTC 和 DNS；不自动修复。'}
+                '代理网络检查.lnk' {$shortcut.Description = '不开 Claude 检查能否使用；简洁结论、按需详情和确认后修复。'}
             }
             $shortcut.Save()
         }

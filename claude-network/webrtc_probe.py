@@ -50,7 +50,13 @@ def project_policy(data):
     raw = main.get('value') if isinstance(main, dict) else None
     metadata = main.get('metadata', []) if isinstance(main, dict) else []
     overrides = urls.get('value') if isinstance(urls, dict) else None
-    allowed = {'managed', 'extension', 'command_line', 'user_modifiable', 'extension_modifiable', 'default'}
+    # Chrome's prefs-internals distinguishes the controlling store from whether
+    # an extension may override it. In particular, command_line_controlled plus
+    # extension_modifiable does not mean an extension currently controls it.
+    allowed = {'managed', 'managed_by_custodian', 'extension_controlled',
+               'command_line_controlled', 'user_controlled', 'recommended',
+               'user_modifiable', 'extension_modifiable', 'default',
+               'extension', 'command_line'}
     return {'value': raw if raw in ('default', 'default_public_and_private_interfaces', 'default_public_interface_only', EXPECTED_POLICY) else 'unrecognized',
             'sources': [x for x in metadata if x in allowed] if isinstance(metadata, list) else [],
             'url_override_count': len(overrides) if isinstance(overrides, list) else None,
@@ -80,7 +86,14 @@ def classify(evidence, expected_ip):
     if not policy.get('url_overrides_empty'):
         return 'unknown', '存在或无法读取按 URL 的 WebRTC 策略，不能用全局值替代实际覆盖。', 'url_override_unverified'
     if 'managed' not in policy.get('sources', []):
-        return 'unknown', '临时浏览器仅有可被扩展覆盖的设置；尚不能将它作为现有专用资料的强制保护证明。', 'profile_scope_unverified'
+        sources = policy.get('sources', [])
+        if 'command_line_controlled' in sources or 'command_line' in sources:
+            detail = '本次临时浏览器的 WebRTC 设置由命令行控制，未读到 managed 强制策略；尚不能据此确认现有专用资料受到强制保护。'
+        elif 'extension_controlled' in sources or 'extension' in sources:
+            detail = '本次临时浏览器的 WebRTC 设置由扩展控制，未读到 managed 强制策略；尚不能据此确认现有专用资料受到强制保护。'
+        else:
+            detail = '本次临时浏览器未读到 managed 强制策略；extension_modifiable 只表示设置可被扩展覆盖，不表示扩展正在控制它。'
+        return 'unknown', detail + ' 应核对运行用户的策略和 Chrome 实际加载结果；来源差异的原因尚未确定。', 'profile_scope_unverified'
     if not control.get('ok'):
         return 'unknown', '独立 STUN 正对照未取得有效响应；零候选不能证明防护生效。', 'stun_control_unavailable'
     if not native.get('offer_created') or not native.get('completed') or native.get('timed_out') or native.get('error'):
