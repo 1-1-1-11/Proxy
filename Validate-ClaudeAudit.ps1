@@ -1,4 +1,5 @@
 ﻿param([switch]$Full, [ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Label = 'v4')
+throw 'Archived: this v1 script is disabled. Use C:\Projects\Proxy-v2 (Deploy-Proxy.ps1).'
 $ErrorActionPreference = 'Stop'
 function Get-AuditState {
     $names = @('C:\Users\example\.claude\settings.json','C:\Users\example\.claude\settings.local.json',

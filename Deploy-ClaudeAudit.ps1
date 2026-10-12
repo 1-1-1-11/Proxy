@@ -1,4 +1,5 @@
 ﻿param([switch]$RestoreOriginalShortcutWorkingDirectories)
+throw 'Archived: this v1 script is disabled. Use C:\Projects\Proxy-v2 (Deploy-Proxy.ps1).'
 $ErrorActionPreference = 'Stop'
 $sourceRoot = Join-Path $PSScriptRoot 'claude-network'
 $installRoot = 'C:\Users\example\.codex\ClaudeNetwork'

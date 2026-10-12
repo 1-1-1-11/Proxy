@@ -1,3 +1,5 @@
+> **已归档（2026-10-12）**：本项目已被 `C:\Projects\Proxy-v2` 取代，安装目录里运行的是 v2。这里只作历史参考；`Deploy-ClaudeAudit.ps1` 和 `Validate-ClaudeAudit.ps1` 已停用，运行会直接报错退出，以免把旧版装回去。最终状态见标签 `v1-final`。
+
 # Proxy：Claude 固定出口
 
 在这台 Windows 工作站上，让 Claude 始终经指定代理、从固定公网 IP 访问。条件不满足时阻断访问并明确告知，不悄悄直连、不切换出口；使用前就能知道能不能用，出问题时知道怎么恢复。
