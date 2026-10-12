@@ -195,6 +195,54 @@ class ActionsTests(unittest.TestCase):
         self.assertEqual(result['exit_code'], 0)
         self.assertIn('重检', result['message'])
 
+    def guard_report(self, **evidence):
+        row = {'id': 'usage_guard', 'required': True, 'status': 'fail', 'evidence': evidence}
+        return {'checks': [row], 'blocking_checks': [{'id': 'usage_guard'}]}
+
+    def present_guard_files(self):
+        existing = Path(__file__).resolve()
+        self.patch('GUARD_MONITOR', new=existing)
+        self.patch('GUARD_LAUNCHER', new=existing)
+
+    def test_dead_guard_offers_start_and_blocked_guard_offers_verified_restore(self):
+        self.present_guard_files()
+        dead = self.guard_report(alive=False)
+        self.assertTrue(self.prepare(dead, 'start_guard')['available'])
+        self.assertFalse(self.prepare(dead, 'restore_proxy')['available'])
+        blocked = self.guard_report(alive=True, fixed_exit_blocked=True)
+        self.assertFalse(self.prepare(blocked, 'start_guard')['available'])
+        self.assertTrue(self.prepare(blocked, 'restore_proxy')['available'])
+        self.assertFalse(self.prepare(proxy_report(), 'start_guard')['available'])
+        self.run.assert_not_called()
+
+    def test_missing_guard_files_disable_start(self):
+        self.patch('GUARD_MONITOR', new=self.root / 'missing-health_monitor.py')
+        plan = self.prepare(self.guard_report(alive=False), 'start_guard')
+        self.assertFalse(plan['available'])
+        self.assertIn('missing-health_monitor.py', plan['reason'])
+        self.assertEqual(actions.execute_option('start_guard', self.root, self.root)['exit_code'], 3)
+        self.run.assert_not_called()
+
+    def test_start_guard_requires_fresh_state_after_launch(self):
+        self.present_guard_files()
+        self.prepare(self.guard_report(alive=False), 'start_guard')
+        self.run.side_effect = None
+        self.run.return_value = subprocess.CompletedProcess([], 0, b'', b'')
+        with mock.patch('audit_proxy.guard_state', return_value={'ok': True, 'alive': True, 'age_seconds': 0.2}):
+            result = actions.execute_option('start_guard', self.root, self.root)
+        self.assertEqual(result['exit_code'], 0)
+        self.assertTrue(self.run.call_args[0][0][0].endswith('explorer.exe'))
+        self.assertEqual(self.run.call_args[0][0][1], str(Path(__file__).resolve()))
+        self.run.side_effect = OSError
+        self.assertEqual(actions._start_guard()['exit_code'], 3)
+        self.run.side_effect = None
+        self.run.return_value = subprocess.CompletedProcess([], 0, b'', b'')
+        clock = iter(range(0, 1000, 30))
+        with mock.patch('audit_proxy.guard_state', return_value={'ok': True, 'alive': True, 'age_seconds': 500}), \
+                mock.patch.object(actions.time, 'monotonic', side_effect=lambda: next(clock)), \
+                mock.patch.object(actions.time, 'sleep'):
+            self.assertEqual(actions._start_guard()['exit_code'], 3)
+
     def test_restore_target_uses_validated_report_ip_with_safe_fallback(self):
         for ip, expected in (('203.0.113.25', '203.0.113.25'),
                              ('private-token\nexample', '本机策略定义的固定出口'),

@@ -6,6 +6,7 @@ Only small network fields leave the browser; SDP and user preferences do not.
 import asyncio
 import ipaddress
 import json
+from pathlib import Path
 
 EXPECTED_POLICY = 'disable_non_proxied_udp'
 STUN_HOST = 'stun.cloudflare.com'
@@ -63,6 +64,72 @@ def project_policy(data):
             'url_overrides_empty': isinstance(overrides, list) and not overrides}
 
 
+def _forced_extension_ids():
+    import winreg
+    ids = set()
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(hive, r'SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist', 0,
+                                    winreg.KEY_READ | view) as key:
+                    for index in range(winreg.QueryInfoKey(key)[1]):
+                        value = winreg.EnumValue(key, index)[1]
+                        if isinstance(value, str) and value.split(';', 1)[0]:
+                            ids.add(value.split(';', 1)[0].strip())
+            except FileNotFoundError:
+                continue
+    return ids
+
+
+def profile_extension_scope(root=None, forced=None):
+    """Extensions in the dedicated profile that could override the command-line WebRTC setting.
+
+    Only extensions holding the privacy permission (or a stored WebRTC preference) can
+    take precedence over a command-line value. Sync and policy can add extensions later,
+    so this is read at every check. Only extension IDs and names enter the report.
+    """
+    result = {'readable': False, 'profiles': [], 'capable': [], 'missing_forced': []}
+    try:
+        if root is None:
+            from browser_entry import PROFILE
+            root = PROFILE
+        root = Path(root)
+        forced = _forced_extension_ids() if forced is None else set(forced)
+        names = []
+        if (root / 'Local State').is_file():
+            names = list(json.loads((root / 'Local State').read_text(encoding='utf-8'))
+                         .get('profile', {}).get('info_cache', {}))
+        elif root.is_dir():
+            names = [p.parent.name for p in root.glob('*/Preferences')]
+        # Chrome's internal System/Guest profiles never load user extensions.
+        names = sorted(set(names) - {'System Profile', 'Guest Profile'})
+        for name in names:
+            settings = {}
+            for filename in ('Preferences', 'Secure Preferences'):
+                path = root / name / filename
+                if path.is_file():
+                    data = json.loads(path.read_text(encoding='utf-8'))
+                    for ident, row in data.get('extensions', {}).get('settings', {}).items():
+                        settings.setdefault(ident, {}).update(row)
+            result['profiles'].append(name)
+            for ident, row in settings.items():
+                granted = set((row.get('active_permissions') or {}).get('api', [])) | \
+                          set((row.get('granted_permissions') or {}).get('api', []))
+                stored = [key for field in ('preferences', 'regular_only_preferences', 'incognito_preferences')
+                          for key in (row.get(field) or {}) if 'webrtc' in key.lower()]
+                if 'privacy' in granted or stored:
+                    result['capable'].append({'profile': name, 'id': ident,
+                                              'name': (row.get('manifest') or {}).get('name')})
+            # A forced extension not yet installed has unknown permissions.
+            result['missing_forced'] += [{'profile': name, 'id': ident} for ident in sorted(forced - set(settings))]
+        if not names and forced:
+            result['missing_forced'] = [{'profile': None, 'id': ident} for ident in sorted(forced)]
+        result['readable'] = True
+    except (OSError, ValueError, TypeError, AttributeError, ImportError) as exc:
+        result['error'] = type(exc).__name__
+    return result
+
+
 def classify(evidence, expected_ip):
     policy = evidence.get('effective_policy', {})
     native = evidence.get('native_ice', {})
@@ -85,15 +152,27 @@ def classify(evidence, expected_ip):
         return ('unknown' if policy.get('value') in (None, 'unrecognized') else 'fail'), 'Chrome 实际生效的 WebRTC 策略未确认限制非代理 UDP。', 'effective_policy_not_protective'
     if not policy.get('url_overrides_empty'):
         return 'unknown', '存在或无法读取按 URL 的 WebRTC 策略，不能用全局值替代实际覆盖。', 'url_override_unverified'
-    if 'managed' not in policy.get('sources', []):
-        sources = policy.get('sources', [])
-        if 'command_line_controlled' in sources or 'command_line' in sources:
-            detail = '本次临时浏览器的 WebRTC 设置由命令行控制，未读到 managed 强制策略；尚不能据此确认现有专用资料受到强制保护。'
+    sources = policy.get('sources', [])
+    command_line = 'command_line_controlled' in sources or 'command_line' in sources
+    scope = evidence.get('profile_scope', {})
+    # The dedicated browser starts with the same switch; only an extension in its
+    # profile could take precedence over it, so a clean profile carries the result.
+    profile_clean = bool(scope.get('readable')) and not scope.get('capable') and not scope.get('missing_forced')
+    if 'managed' not in sources and not (command_line and profile_clean):
+        if command_line and scope.get('capable'):
+            names = '、'.join(sorted({str(row.get('name') or row.get('id')) for row in scope['capable']}))
+            detail = '专用浏览器资料中有能改写 WebRTC 设置的扩展（' + names + '），命令行设置可能被覆盖。'
+        elif command_line and scope.get('missing_forced'):
+            detail = '有策略强制安装但尚未装入专用资料的扩展，无法确认其权限。'
+        elif command_line:
+            detail = '本次临时浏览器的 WebRTC 设置由命令行控制，但无法读取专用浏览器资料中的扩展。'
         elif 'extension_controlled' in sources or 'extension' in sources:
             detail = '本次临时浏览器的 WebRTC 设置由扩展控制，未读到 managed 强制策略；尚不能据此确认现有专用资料受到强制保护。'
         else:
             detail = '本次临时浏览器未读到 managed 强制策略；extension_modifiable 只表示设置可被扩展覆盖，不表示扩展正在控制它。'
-        return 'unknown', detail + ' 应核对运行用户的策略和 Chrome 实际加载结果；来源差异的原因尚未确定。', 'profile_scope_unverified'
+        if not command_line:
+            detail += ' 应核对运行用户的策略和 Chrome 实际加载结果；来源差异的原因尚未确定。'
+        return 'unknown', detail, 'profile_scope_unverified'
     if not control.get('ok'):
         return 'unknown', '独立 STUN 正对照未取得有效响应；零候选不能证明防护生效。', 'stun_control_unavailable'
     if not native.get('offer_created') or not native.get('completed') or native.get('timed_out') or native.get('error'):
@@ -105,7 +184,8 @@ def classify(evidence, expected_ip):
         return 'fail', '本次测试浏览器仍发出了 STUN UDP；保护与实际行为不一致。', 'browser_stun_udp_observed'
     if evidence['local_candidate_ips']:
         return 'warn', '原生 ICE 显示本地地址候选；未将其冒充为公网泄漏，也不判完整通过。', 'local_candidate_observed'
-    return 'pass', '已确认有效强制策略、STUN 正对照可用、原生 ICE 完成；未发现测试浏览器的非代理 STUN UDP 或异常公网候选。', 'policy_and_native_ice_verified'
+    basis = '有效强制策略' if 'managed' in sources else '命令行设置生效且专用资料中没有能覆盖它的扩展'
+    return 'pass', '已确认' + basis + '、STUN 正对照可用、原生 ICE 完成；未发现测试浏览器的非代理 STUN UDP 或异常公网候选。', 'policy_and_native_ice_verified'
 
 
 def owned_udp_records(root_pids):
@@ -148,6 +228,7 @@ async def native_check(context, expected_ip):
         await page.goto('chrome://prefs-internals', wait_until='load', timeout=8000)
         await page.wait_for_function("() => {try {const v=JSON.parse(document.body.innerText);return !!(v.webrtc?.ip_handling_policy || v['webrtc.ip_handling_policy']);} catch (_) {return false;}}", timeout=8000)
         evidence['effective_policy'] = project_policy(json.loads(await page.locator('body').inner_text()))
+        evidence['profile_scope'] = await asyncio.to_thread(profile_extension_scope)
         await page.goto('https://www.cloudflare.com/cdn-cgi/trace', wait_until='domcontentloaded', timeout=15000)
         trace = dict(line.split('=', 1) for line in (await page.locator('body').inner_text()).splitlines() if '=' in line)
         evidence['observed_ip'] = str(ipaddress.ip_address(trace.get('ip', '')))

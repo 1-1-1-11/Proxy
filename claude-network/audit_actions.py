@@ -101,7 +101,11 @@ def _build_options(report, install_dir):
         except ValueError:
             pass
     repairable = {'mihomo_core', 'listener_owner', 'controller', 'fixed_policy', 'browser-build-baseline'}
-    applies = any(key in repairable or re.fullmatch(r'settings-\d+', key) for key in blockers)
+    guard = blockers.get('usage_guard', {})
+    guard_evidence = guard.get('evidence', {}) or {}
+    # A guard block is lifted only by the restore backend, which verifies the exit first.
+    applies = (any(key in repairable or re.fullmatch(r'settings-\d+', key) for key in blockers)
+               or bool(guard_evidence.get('fixed_exit_blocked')))
     missing = _restore_dependencies(install_dir) if applies else []
     restore = {'id': 'restore_proxy', 'title': '恢复本机已有的受管理代理配置',
                'available': bool(applies and not missing),
@@ -148,7 +152,44 @@ def _build_options(report, install_dir):
               'expected': '设置当前用户策略后重新检查；仍需确认 Chrome 实际加载结果，不能以注册表写入成功代替 WebRTC 验收。',
               'rollback': '使用执行结果给出的 --rollback-backup 命令，只恢复此单个值；检测到后续不同修改时拒绝覆盖。',
               'reason': explanation or '观测原因是策略值或来源问题，当前用户尚未设置期望值，且未发现 HKLM 冲突或 URL 特例。'}
-    return [restore, chrome]
+    guard_dead = guard.get('status') == 'fail' and guard_evidence.get('alive') is False
+    guard_missing = [path.name for path in (GUARD_MONITOR, GUARD_LAUNCHER) if not path.is_file()]
+    start = {'id': 'start_guard', 'title': '启动使用中守护',
+             'available': guard_dead and not guard_missing,
+             'changes': ['像开机时一样运行开机启动项中的守护；它是单实例，已在运行时不会重复启动。不修改任何文件。'],
+             'impact': '守护约每 30 秒核对一次出口：IP 不符时把 Claude、Google、X 固定出口切为拒绝并断开现有连接；日常线路连续失败时会重载 Clash 配置。',
+             'expected': '守护启动并写出新状态后重新检查。',
+             'rollback': '在任务管理器结束运行 health_monitor.py 的 pythonw 进程即可停止；下次登录时它会随开机启动项再次运行。',
+             'reason': ('缺少：' + '、'.join(guard_missing)) if guard_missing else
+                       '使用中守护没有运行。' if guard_dead else '使用中守护不需要启动。'}
+    return [restore, chrome, start]
+
+
+GUARD_MONITOR = Path.home() / '.codex/CodexNetworkGuard/health_monitor.py'
+GUARD_LAUNCHER = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / \
+    'Microsoft/Windows/Start Menu/Programs/Startup/CodexNetworkGuard.lnk'
+
+
+def _start_guard():
+    # Same path as login: Explorer opens the startup shortcut, so the guard runs on the
+    # user's desktop (its alerts are visible) and outlives this terminal. guard.ps1 is
+    # single-instance and restarts a missing monitor within 30 seconds.
+    started = time.time()
+    try:
+        # Explorer's exit code is not meaningful; success is the fresh state below.
+        subprocess.run([os.environ.get('SystemRoot', r'C:\Windows') + r'\explorer.exe', str(GUARD_LAUNCHER)],
+                       capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {'exit_code': 3, 'message': '守护未能启动；未作其他修改。'}
+    from audit_proxy import guard_state
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        state = guard_state()
+        age = state.get('age_seconds')
+        if state.get('alive') and age is not None and 0 <= age <= time.time() - started + 1:
+            return {'exit_code': 0, 'message': '使用中守护已启动并写出新状态；接下来重新检查。'}
+        time.sleep(2)
+    return {'exit_code': 3, 'message': '已请求启动守护，但 90 秒内没有看到它写出新状态；请重新检查。'}
 
 
 def repair_options(report, install_dir):
@@ -229,6 +270,8 @@ def execute_option(option_id, install_dir, workspace):
     if not option or not option['available']:
         return {'exit_code': 3, 'message': '方案当前不可执行；未作修改。' + (option['reason'] if option else '')}
     _prepared.pop(str(root), None)
+    if option_id == 'start_guard':
+        return _start_guard()
     if option_id == 'restore_proxy':
         try:
             result = subprocess.run([sys.executable, '-X', 'utf8', '-B', str(root / 'repair_proxy.py'),

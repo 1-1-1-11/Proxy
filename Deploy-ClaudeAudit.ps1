@@ -6,13 +6,18 @@ $npmTarget = 'C:\Users\example\AppData\Roaming\npm\claude-proxy.cmd'
 $desktopRoot = 'C:\Users\example\Desktop'
 $backupRoot = Join-Path $PSScriptRoot ('deployment-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $files = @('stun_probe.py','webrtc_probe.py','audit_policy.json','audit_proxy.py','audit_actions.py','audit_settings.py','audit_browser.py',
-    'network_check.py','browser_entry.py','route_verify.py','repair_proxy.py',
-    'ClaudeBrowser.cs','ClaudeBrowser.exe','browser-build.json',
+    'network_check.py','browser_entry.py','route_verify.py','repair_proxy.py','routing-baseline.js',
+    'ClaudeBrowser.cs','ClaudeBrowser.exe','browser-build.json','ClaudeStatus.cs','ClaudeStatus.exe',
     'Open-ClaudeBrowser.ps1','Repair-ClaudeProxy.ps1','claude-fixed.cmd','Network-Check.cmd','使用说明.txt')
+$guardRoot = 'C:\Users\example\.codex\CodexNetworkGuard'
+$guardFiles = @('health_monitor.py','guard.ps1','run-hidden.vbs')
 $shortcuts = @('Claude 专用浏览器.lnk','Claude 打开授权链接.lnk','Claude CLI 固定出口.lnk','代理网络检查.lnk')
 $plan = @()
 foreach ($name in $files) {
     $plan += [pscustomobject]@{source=(Join-Path $sourceRoot $name);target=(Join-Path $installRoot $name);kind='file';key=('install-' + $name)}
+}
+foreach ($name in $guardFiles) {
+    $plan += [pscustomobject]@{source=(Join-Path (Join-Path $PSScriptRoot 'CodexNetworkGuard') $name);target=(Join-Path $guardRoot $name);kind='file';key=('guard-' + $name)}
 }
 $plan += [pscustomobject]@{source=(Join-Path $sourceRoot '使用说明.txt');target=(Join-Path $installRoot '代理修复命令说明.md');kind='file';key='install-代理修复命令说明.md'}
 $plan += [pscustomobject]@{source=(Join-Path $sourceRoot 'claude-proxy.cmd');target=$npmTarget;kind='file';key='npm-claude-proxy.cmd'}
@@ -21,7 +26,7 @@ foreach ($name in $shortcuts) {
 }
 foreach ($entry in $plan) {
     $absolute = [IO.Path]::GetFullPath($entry.target)
-    $expectedParent = if ($entry.kind -eq 'shortcut') {$desktopRoot} elseif ($entry.target -eq $npmTarget) {[IO.Path]::GetDirectoryName($npmTarget)} else {$installRoot}
+    $expectedParent = if ($entry.kind -eq 'shortcut') {$desktopRoot} elseif ($entry.target -eq $npmTarget) {[IO.Path]::GetDirectoryName($npmTarget)} elseif ($entry.key -like 'guard-*') {$guardRoot} else {$installRoot}
     if ([IO.Path]::GetDirectoryName($absolute) -ne $expectedParent) {throw 'Unexpected deployment target.'}
     if ($entry.source -and -not (Test-Path -LiteralPath $entry.source -PathType Leaf)) {throw ('Missing source: ' + $entry.key)}
     if ($entry.kind -eq 'shortcut' -and -not (Test-Path -LiteralPath $entry.target -PathType Leaf)) {throw ('Missing shortcut: ' + $entry.key)}

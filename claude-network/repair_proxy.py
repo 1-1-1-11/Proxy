@@ -24,6 +24,8 @@ SELECT={'Claude-固定出口':FIXED,'Google-固定出口':FIXED,'X-固定出口'
 VALUES={k:'http://127.0.0.1:17892' for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']}
 VALUES.update(NO_PROXY='localhost,127.0.0.1,::1',no_proxy='localhost,127.0.0.1,::1')
 VALUES['BROWSER']=str(HERE/'ClaudeBrowser.exe')
+PROTECTED=['Claude-固定出口','Google-固定出口','X-固定出口']
+VERIFY_PORT=17893
 JST=datetime.timezone(datetime.timedelta(hours=9))
 
 class RepairError(Exception):
@@ -183,9 +185,25 @@ def inspect_live(cfg):
 def put_config(cfg):
     code,_=api('/configs?force=true','PUT',{'payload':yaml.safe_dump(cfg,allow_unicode=True,sort_keys=False)})
     if code!=204:raise RepairError('Clash 拒绝新配置，未忽略该错误。')
-def select_groups():
+def verify_exit():
+    # The verify listener reaches the fixed chain directly, so the exit is known before Claude is reopened.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(lambda url:probe(VERIFY_PORT,url),['https://www.cloudflare.com/cdn-cgi/trace','https://api.ipify.org?format=json']))
+    return {'probes':results,'ok':all(p['curl_exit']==0 and p.get('ip')==EXPECTED_IP for p in results),
+            'wrong_exit':any(p.get('ip') and p['ip']!=EXPECTED_IP for p in results)}
+def protected_closed():
+    # Closed now (guard block or REJECT) means it must stay closed until verify_exit passes.
+    try:
+        if json.loads((GUARD/'network-state.json').read_text(encoding='utf-8')).get('fixed_exit_blocked'):return True
+    except (OSError,ValueError,AttributeError):pass
+    try:
+        groups=api('/proxies')[1]['proxies']
+        return any(groups.get(name,{}).get('now')=='REJECT' for name in PROTECTED)
+    except Exception:return False
+def select_groups(protected=True):
     groups=api('/proxies')[1]['proxies'];changed=[]
     for name,target in SELECT.items():
+        if not protected and name in PROTECTED:continue
         if name in groups and groups[name].get('now')!=target:
             code,_=api('/proxies/'+urllib.parse.quote(name,safe=''),'PUT',{'name':target})
             if code!=204:raise RepairError('Clash 未接受受管理代理组的选择。')
@@ -212,7 +230,7 @@ def launch_app(restart=False):
 def app_running():
     return ps("[bool](Get-Process -Name 'clash-verge' -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq 'C:\\Tools\\ClashVerge\\clash-verge.exe'})").strip().lower()=='true'
 def fail_closed():
-    protected=['Claude-固定出口','Google-固定出口','X-固定出口']
+    protected=PROTECTED
     for name in protected:
         code,_=api('/proxies/'+urllib.parse.quote(name,safe=''),'PUT',{'name':'REJECT'})
         if code!=204:raise RepairError('发现出口变化，但未能确认封锁受保护通道；请停止使用 Claude。',22)
@@ -247,6 +265,7 @@ def execute(args):
                     result['route_checks']=route_checks()
                     if not result['route_checks']['ok']:code=20
                 return finish(result,code)
+            was_closed=protected_closed();result['protected_closed_before']=was_closed
             if rebuild:build_browser(changes)
             for p,data in setting_changes.items():changes.write(p,data)
             if clash_changes:
@@ -267,21 +286,31 @@ def execute(args):
             else:say('[2/4] 持久代理规则正确，无需重启 Clash。')
             current=inspect_live(cfg)
             if current.get('config_drift'):put_config(cfg)
-            result['groups_corrected']=select_groups()
+            # A restart or reload may restore a saved selection; a closed group stays closed until verified.
+            if was_closed:fail_closed()
+            result['groups_corrected']=select_groups(protected=False)
             result['changed_files']=[str(p) for p in changes.before]
             result['backup_dir']=str(changes.folder) if changes.before else None
             if physical.get('ready') is False:
                 say('Wi-Fi / 网线尚未连接。已修正本地配置；不会用重载代理代替物理联网。')
                 return finish(result,10)
-            say('[3/4] 检查完整链路，并实测日常与 Claude 固定出口……')
-            warmup();status=health()
-            if status['wrong_exit']:
-                fail_closed();result['health']=status;return finish(result,22)
-            if not status['daily_ok'] or not status['fixed_ok']:
+            say('[3/4] 先在检查专用端口核对固定出口，确认无误后才放行 Claude……')
+            warmup();verified=verify_exit()
+            if not verified['ok'] and not verified['wrong_exit']:
                 # One bounded reload is allowed, not an unending reset/retry loop.
-                say('首次检查未通过，执行一次配置重载和完整链路复测……')
-                put_config(cfg);select_groups();warmup();status=health()
-                if status['wrong_exit']:fail_closed()
+                say('首次核对未通过，执行一次配置重载和完整链路复测……')
+                put_config(cfg)
+                if was_closed:fail_closed()
+                select_groups(protected=False);warmup();verified=verify_exit()
+            result['verify']=verified
+            if verified['wrong_exit']:
+                fail_closed();result['health']=health();return finish(result,22)
+            if not verified['ok']:
+                # Exit unknown: protected groups are not reopened by this repair.
+                result['health']=health();return finish(result,20)
+            result['groups_corrected']+=select_groups()
+            status=health()
+            if status['wrong_exit']:fail_closed()
             result['health']=status
             result['live_after']=inspect_live(cfg)
             result['app_running']=app_running()

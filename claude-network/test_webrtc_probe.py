@@ -107,6 +107,50 @@ class ClassificationTests(unittest.TestCase):
         self.assertIn('由命令行控制', detail)
         self.assertNotIn('由扩展控制', detail)
 
+    def test_command_line_passes_only_with_clean_readable_profile(self):
+        clean = {'readable': True, 'capable': [], 'missing_forced': []}
+        cases = [(clean, 'pass', None),
+                 ({**clean, 'capable': [{'id': 'x', 'name': 'WebRTC Control'}]}, 'unknown', 'WebRTC Control'),
+                 ({**clean, 'missing_forced': [{'id': 'y'}]}, 'unknown', '尚未装入'),
+                 ({'readable': False}, 'unknown', '无法读取'), ({}, 'unknown', '无法读取')]
+        for scope, status, text in cases:
+            with self.subTest(scope=scope):
+                evidence = good_evidence()
+                evidence['effective_policy']['sources'] = ['command_line_controlled', 'extension_modifiable']
+                evidence['profile_scope'] = scope
+                result, detail, _ = probe.classify(evidence, EXPECTED)
+                self.assertEqual(result, status)
+                if text:
+                    self.assertIn(text, detail)
+        evidence = good_evidence()
+        evidence['effective_policy']['sources'] = ['extension_controlled']
+        evidence['profile_scope'] = clean
+        self.assertEqual(probe.classify(evidence, EXPECTED)[0], 'unknown')
+
+    def test_profile_scan_finds_privacy_permission_and_missing_forced_extensions(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'Local State').write_text(json.dumps({'profile': {'info_cache': {'Default': {}, 'Profile 1': {}}}}), encoding='utf-8')
+            for name, settings in {'Default': {'a': {'active_permissions': {'api': ['storage']}, 'manifest': {'name': 'Plain'}},
+                                               'forced': {'active_permissions': {'api': []}}},
+                                   'Profile 1': {'b': {'active_permissions': {'api': ['privacy']}, 'manifest': {'name': 'Leaky'}},
+                                                 'c': {'preferences': {'webrtc.ip_handling_policy': 'default'}}},
+                                   'System Profile': {}}.items():
+                (root / name).mkdir()
+                (root / name / 'Secure Preferences').write_text(json.dumps({'extensions': {'settings': settings}}), encoding='utf-8')
+            (root / 'System Profile' / 'Preferences').write_text('{}', encoding='utf-8')
+            scope = probe.profile_extension_scope(root, forced={'forced'})
+            self.assertTrue(scope['readable'])
+            self.assertEqual(scope['profiles'], ['Default', 'Profile 1'])
+            self.assertEqual(sorted(row['id'] for row in scope['capable']), ['b', 'c'])
+            self.assertEqual(scope['missing_forced'], [{'profile': 'Profile 1', 'id': 'forced'}])
+            (root / 'Default' / 'Secure Preferences').write_text('{broken', encoding='utf-8')
+            self.assertFalse(probe.profile_extension_scope(root, forced=set())['readable'])
+        self.assertEqual(probe.profile_extension_scope(Path(folder) / 'absent', forced={'z'})['missing_forced'],
+                         [{'profile': None, 'id': 'z'}])
+
     def test_url_override_missing_or_nonempty_cannot_pass(self):
         for flag in (None, False):
             evidence = good_evidence()
@@ -198,7 +242,7 @@ class FakePage:
 
 
 class NativeCheckTests(unittest.TestCase):
-    def run_check(self, page, *, control=None, udp=None):
+    def run_check(self, page, *, control=None, udp=None, scope=None):
         async def cdp_send(command): return {'processInfo': [{'type': 'browser', 'id': 123}, {'type': 'renderer', 'id': 999}]}
         async def new_cdp(): return types.SimpleNamespace(send=cdp_send)
         async def new_page(): return page
@@ -210,6 +254,7 @@ class NativeCheckTests(unittest.TestCase):
         reader = mock.Mock(side_effect=udp) if isinstance(udp, list) else mock.Mock(return_value=udp or {'readable': True, 'records': []})
         with mock.patch.dict(sys.modules, {'stun_probe': stun}), \
              mock.patch.object(probe, 'owned_udp_records', reader), \
+             mock.patch.object(probe, 'profile_extension_scope', return_value=scope or {'readable': False}), \
              mock.patch.object(probe.asyncio, 'to_thread', new=to_thread), \
              mock.patch.object(probe.asyncio, 'gather', new=gather), \
              mock.patch.object(probe.asyncio, 'sleep', new=sleep):
@@ -242,6 +287,14 @@ class NativeCheckTests(unittest.TestCase):
         self.assertEqual(evidence['effective_policy']['sources'],
                          ['command_line_controlled', 'extension_modifiable'])
         self.assertIn('由命令行控制', detail)
+
+    def test_completed_ice_with_command_line_and_clean_profile_passes(self):
+        raw = prefs()
+        raw['webrtc']['ip_handling_policy']['metadata'] = ['command_line_controlled', 'extension_modifiable']
+        clean = {'readable': True, 'profiles': ['Default'], 'capable': [], 'missing_forced': []}
+        (status, detail, evidence), _ = self.run_check(FakePage(raw_prefs=raw), scope=clean)
+        self.assertEqual((status, evidence['reason']), ('pass', 'policy_and_native_ice_verified'))
+        self.assertIn('没有能覆盖它的扩展', detail)
 
     def test_positive_control_failure_and_trace_mismatch_are_not_pass(self):
         (status, _, _), _ = self.run_check(FakePage(), control={'ok': False})

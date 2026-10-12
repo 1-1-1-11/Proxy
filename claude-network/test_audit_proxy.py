@@ -23,7 +23,9 @@ def fixture():
             'tcp': {'ok': True, 'listeners': [{'pid': 10, 'address': '127.0.0.1', 'port': 17892}],
                     'connections': []},
             'physical': {'ok': True, 'ready': True, 'ipv6_gateway': False},
-            'system': {'ok': True}}
+            'system': {'ok': True},
+            'guard': {'ok': True, 'alive': True, 'age_seconds': 10, 'fixed_exit_blocked': False,
+                      'repair_active': False}}
     ctl = {'ok': True, 'version': {'version': 'test-only'},
            'configs': {'mode': 'rule', 'tun': {'enable': True}},
            'proxies': {'proxies': {
@@ -789,11 +791,176 @@ class ConsoleOutputTests(OfflineCase):
         report = self.make_report(checks, mode='full_check')
         with contextlib.redirect_stdout(io.StringIO()) as output:
             audit.display(report)
+        with contextlib.redirect_stdout(io.StringIO()) as expanded:
+            audit.display(report, details=True)
         self.assertEqual(report['cli_launch_state'], 'READY')
         self.assertEqual(report['browser_launch_state'], 'INCOMPLETE')
         self.assertIn('WebRTC', output.getvalue())
-        self.assertIn('BLOCKER_WEBRTC_UNAVAILABLE', output.getvalue())
+        self.assertIn('处理：CLI / VS Code 不受影响', output.getvalue())
+        self.assertNotIn('BLOCKER_WEBRTC_UNAVAILABLE', output.getvalue())
+        self.assertIn('BLOCKER_WEBRTC_UNAVAILABLE', expanded.getvalue())
         self.assertNotIn('先启动 Claude', output.getvalue())
+
+    def test_guard_block_shows_one_cause_instead_of_downstream_symptoms(self):
+        policy, snap, ctl, disk, probes, route = fixture()
+        snap['guard']['fixed_exit_blocked'] = True
+        ctl['proxies']['proxies'][policy['fixed_group']]['now'] = 'REJECT'
+        probes = [{'ok': False, 'error': 'RemoteDisconnected', 'source': s} for s in ('cloudflare', 'ipify')]
+        report = self.make_report(audit.evaluate_path(policy, snap, ctl, disk, probes, {'ok': False}))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            audit.display(report)
+        text = output.getvalue()
+        self.assertEqual(report['state'], 'NOT_READY')
+        self.assertIn('暂不能使用 Claude', text)
+        self.assertIn('已自动阻断 Claude', text)
+        self.assertNotIn('线路配置被改动', text)
+        self.assertNotIn('暂时连不上', text)
+        self.assertEqual(text.count('原因：'), 1)
+
+    def test_changed_exit_names_both_addresses_and_supplier_as_next_step(self):
+        policy, snap, ctl, disk, probes, route = fixture()
+        probes = [{'ok': True, 'ip': '198.51.100.7', 'source': s} for s in ('cloudflare', 'ipify')]
+        report = self.make_report(audit.evaluate_path(policy, snap, ctl, disk, probes, route))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            audit.display(report)
+        self.assertIn('198.51.100.7', output.getvalue())
+        self.assertIn(policy['expected_ip'], output.getvalue())
+        self.assertIn('联系供应商', output.getvalue())
+
+    def test_mode_line_names_claude_domestic_and_abnormal_modes(self):
+        for configs, text in (({'mode': 'rule', 'tun': {'enable': True}}, '当前模式：Claude 模式'),
+                              ({'mode': 'rule', 'tun': {'enable': False}}, '当前模式：国内模式'),
+                              ({'mode': 'global', 'tun': {'enable': True}}, '当前模式：异常')):
+            with self.subTest(configs=configs):
+                policy, snap, ctl, disk, probes, route = fixture()
+                ctl['configs'] = configs
+                report = self.make_report(audit.evaluate_path(policy, snap, ctl, disk, probes, route))
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    audit.display(report)
+                self.assertIn(text, output.getvalue())
+                self.assertIn('CLI：可以使用', output.getvalue())
+
+
+class EntryStateTests(OfflineCase):
+    def settings(self, vscode_status='pass'):
+        return [audit.item('settings-0', 'Claude 用户设置', 'pass', '', required=True, category='configuration'),
+                audit.item('settings-1', 'VS Code 用户设置', vscode_status, '', required=True, category='configuration'),
+                audit.item('settings-1-identity', '官方 API 与认证覆盖', vscode_status, '', required=True, category='configuration'),
+                audit.item('client-signature-cli', 'CLI 官方签名', 'pass', '', required=True, category='configuration')]
+
+    def test_vscode_only_problem_leaves_cli_usable_and_launchable(self):
+        checks = audit.evaluate_path(*fixture()) + self.settings('fail') + [
+            audit.item('desktop_app', 'Claude 桌面端', 'not_running', '', {'installed': False}, category='application')]
+        summary = audit.summarize(checks, mode='check')
+        self.assertEqual(summary['entries'], {'cli': 'READY', 'vscode': 'NOT_READY', 'web': 'NOT_CHECKED',
+                                              'desktop': 'NOT_INSTALLED'})
+        self.assertEqual(summary['state'], 'NOT_READY')
+        self.assertEqual(audit.summarize(checks, mode='launch_check')['state'], 'LAUNCH_READY')
+        report = {'started_at': 'T', 'mode': 'check', 'checks': checks, 'limitations': [], **summary}
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            audit.display(report)
+        text = output.getvalue()
+        self.assertIn('结论：部分可用', text)
+        self.assertIn('CLI：可以使用', text)
+        self.assertIn('VS Code：暂不能使用', text)
+        self.assertIn('桌面端：未安装', text)
+
+    def test_cli_only_problem_blocks_cli_but_not_vscode(self):
+        checks = audit.evaluate_path(*fixture()) + self.settings()
+        checks[-1]['status'] = 'fail'
+        entries = audit.summarize(checks)['entries']
+        self.assertEqual((entries['cli'], entries['vscode']), ('NOT_READY', 'READY'))
+
+    def test_installed_desktop_depends_on_rule_mode(self):
+        installed = audit.item('desktop_app', 'Claude 桌面端', 'not_tested', '', {'installed': True}, category='application')
+        policy, snap, ctl, disk, probes, route = fixture()
+        self.assertEqual(audit.summarize(audit.evaluate_path(policy, snap, ctl, disk, probes, route) + [installed])
+                         ['entries']['desktop'], 'UNVERIFIED')
+        for configs in ({'mode': 'global', 'tun': {'enable': True}}, {'mode': 'rule', 'tun': {'enable': False}}):
+            ctl['configs'] = configs
+            entries = audit.summarize(audit.evaluate_path(policy, snap, ctl, disk, probes, route) + [installed])['entries']
+            self.assertEqual((entries['desktop'], entries['cli']), ('NOT_READY', 'READY'))
+        self.assertEqual(audit.summarize(audit.evaluate_path(*fixture()))['entries']['desktop'], 'NOT_CHECKED')
+
+    def test_desktop_detection_reads_install_locations_only(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.dict(audit.os.environ, {'LOCALAPPDATA': folder}):
+                self.assertFalse(audit.desktop_app()['evidence']['installed'])
+                (Path(folder) / 'AnthropicClaude').mkdir()
+                (Path(folder) / 'AnthropicClaude' / 'claude.exe').write_bytes(b'')
+                self.assertTrue(audit.desktop_app()['evidence']['installed'])
+
+
+class GuardAndRoutingTests(OfflineCase):
+    def evaluate(self, guard=None, configs=None, controller_ok=True):
+        policy, snap, ctl, disk, probes, route = fixture()
+        if guard is not None:
+            snap['guard'] = guard
+        if configs is not None:
+            ctl['configs'] = configs
+        ctl['ok'] = controller_ok
+        checks = audit.evaluate_path(policy, snap, ctl, disk, probes, route)
+        return by_id(checks), audit.summarize(checks, mode='preflight')
+
+    def test_healthy_guard_and_rule_mode_with_tun_pass(self):
+        checks, summary = self.evaluate()
+        self.assertEqual(checks['usage_guard']['status'], 'pass')
+        self.assertEqual(checks['routing_mode']['status'], 'pass')
+        self.assertEqual(checks['routing_mode']['evidence']['profile'], 'claude')
+        self.assertTrue(checks['usage_guard']['required'])
+        self.assertFalse(checks['routing_mode']['required'])
+        self.assertEqual(summary['state'], 'PROXY_READY')
+
+    def test_guard_problems_block_launch(self):
+        cases = {'dead': ({'ok': True, 'alive': False, 'age_seconds': 5}, 'fail', 'NOT_READY'),
+                 'blocked': ({'ok': True, 'alive': True, 'age_seconds': 5, 'fixed_exit_blocked': True}, 'fail', 'NOT_READY'),
+                 'stale': ({'ok': True, 'alive': True, 'age_seconds': 400}, 'fail', 'NOT_READY'),
+                 'no_state': ({'ok': True, 'alive': True, 'age_seconds': None}, 'fail', 'NOT_READY'),
+                 'repairing': ({'ok': True, 'alive': True, 'age_seconds': 400, 'repair_active': True}, 'unknown', 'INCOMPLETE'),
+                 'unreadable': ({'ok': False, 'error': 'OSError'}, 'unknown', 'INCOMPLETE'),
+                 'missing': ({}, 'unknown', 'INCOMPLETE')}
+        for name, (guard, status, state) in cases.items():
+            with self.subTest(name):
+                checks, summary = self.evaluate(guard=guard)
+                self.assertEqual(checks['usage_guard']['status'], status)
+                self.assertEqual(summary['state'], state)
+                self.assertFalse(summary['ready'])
+
+    def test_domestic_and_abnormal_modes_keep_port_entries_usable(self):
+        for configs, profile, status in (({'mode': 'rule', 'tun': {'enable': False}}, 'domestic', 'pass'),
+                                         ({'mode': 'rule'}, 'domestic', 'pass'),
+                                         ({'mode': 'global', 'tun': {'enable': True}}, 'abnormal', 'warn'),
+                                         ({'mode': 'direct', 'tun': {'enable': False}}, 'abnormal', 'warn')):
+            with self.subTest(configs=configs):
+                checks, summary = self.evaluate(configs=configs)
+                self.assertEqual((checks['routing_mode']['evidence']['profile'], checks['routing_mode']['status']),
+                                 (profile, status))
+                self.assertEqual(summary['state'], 'PROXY_READY')
+
+    def test_unreadable_controller_leaves_routing_unknown(self):
+        checks, _ = self.evaluate(controller_ok=False)
+        self.assertEqual(checks['routing_mode']['status'], 'unknown')
+
+    def test_guard_state_reads_age_block_and_repair_flags(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            written = audit.datetime.datetime.now(audit.JST) - audit.datetime.timedelta(seconds=30)
+            (root / 'network-state.json').write_text(json.dumps({'time': written.isoformat(),
+                                                                 'fixed_exit_blocked': True}), encoding='utf-8')
+            (root / 'repair-active.json').write_text(json.dumps({'expires': audit.time.time() + 60}), encoding='utf-8')
+            with mock.patch.object(audit, 'GUARD_DIR', root), mock.patch.object(audit, '_mutex_exists', return_value=True):
+                state = audit.guard_state()
+            self.assertTrue(state['ok'] and state['alive'] and state['fixed_exit_blocked'] and state['repair_active'])
+            self.assertTrue(29 <= state['age_seconds'] <= 40)
+            (root / 'network-state.json').unlink()
+            (root / 'repair-active.json').write_text(json.dumps({'expires': 0}), encoding='utf-8')
+            with mock.patch.object(audit, 'GUARD_DIR', root), mock.patch.object(audit, '_mutex_exists', return_value=False):
+                state = audit.guard_state()
+            self.assertEqual((state['alive'], state['age_seconds'], state['repair_active']), (False, None, False))
+            with mock.patch.object(audit, '_mutex_exists', side_effect=OSError):
+                self.assertEqual(audit.guard_state(), {'ok': False, 'error': 'OSError'})
 
 
 if __name__ == '__main__':

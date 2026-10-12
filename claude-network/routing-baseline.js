@@ -60,9 +60,12 @@ function main(config) {
     {name: dailyGroup, type: "select", proxies: [daily, "REJECT"]}
   );
   // This listener pins Claude CLI independently of rule/global/direct mode.
-  config.listeners = (config.listeners || []).filter(l => l.name !== "claude-fixed-http");
+  config.listeners = (config.listeners || []).filter(l => !["claude-fixed-http", "claude-verify-http"].includes(l.name));
   config.listeners.push({name: "claude-fixed-http", type: "http", listen: "127.0.0.1",
     port: 17892, proxy: "Claude-固定出口", users: []});
+  // Repair probes the chain here while the protected groups stay REJECT; no client uses it.
+  config.listeners.push({name: "claude-verify-http", type: "http", listen: "127.0.0.1",
+    port: 17893, proxy: chainGroup, users: []});
   const rules = [
     "PROCESS-NAME,claude.exe,Claude-固定出口",
     "PROCESS-NAME,codex.exe,OpenAI-日常代理",
@@ -70,7 +73,9 @@ function main(config) {
     "PROCESS-NAME,Antigravity.exe,Google-固定出口"
   ];
   const domains = {
-    "Claude-固定出口": ["anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com", "clau.de"],
+    // Official app/content hosts: https://code.claude.com/docs/en/desktop#network-access-requirements
+    "Claude-固定出口": ["anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com", "clau.de",
+      "claudemcpcontent.com", "claude.app"],
     "OpenAI-日常代理": ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "auth0.com"],
     "Google-固定出口": ["google.com", "googleapis.com", "gstatic.com", "googleusercontent.com", "googlesyndication.com"],
     "X-固定出口": ["x.com", "twitter.com", "twimg.com", "t.co"]

@@ -20,8 +20,13 @@ def probe(port,url='https://www.cloudflare.com/cdn-cgi/trace'):
         if conn:conn.close()
 def checked(port):
     result=probe(port)
-    if result['curl_exit'] or not result.get('ip'):result=probe(port,'https://api.ipify.org?format=json')
-    return result
+    attempts=[dict(result,endpoint='www.cloudflare.com')]
+    if result['curl_exit'] or not result.get('ip'):
+        result=probe(port,'https://api.ipify.org?format=json')
+        attempts.append(dict(result,endpoint='api.ipify.org'))
+    # Keep the original failure when a second endpoint succeeds or also fails.
+    # Only fixed public endpoints and structured results are recorded; no URLs or credentials.
+    return dict(result,attempts=attempts)
 def fixed_ready():
     from audit_proxy import preflight
     result=preflight(Path(__file__).parent)

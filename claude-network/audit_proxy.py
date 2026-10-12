@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import subprocess
@@ -22,11 +23,16 @@ import sys
 import time
 import urllib.parse
 
-VERSION = '2026.10.07.1'
+VERSION = '2026.10.07.2'
 HERE = Path(__file__).resolve().parent
 HIDDEN = 0x08000000 if os.name == 'nt' else 0
 JST = datetime.timezone(datetime.timedelta(hours=9))
 BAD = {'fail', 'unknown', 'not_tested', 'not_running', 'warn', 'partial'}
+# The in-use guard (CodexNetworkGuard/health_monitor.py) blocks Claude when the
+# exit changes. Its single-instance mutex is the liveness signal.
+GUARD_DIR = Path.home() / '.codex' / 'CodexNetworkGuard'
+GUARD_MUTEX = 'Local\\ClashNetworkHealth-example'
+GUARD_STALE_SECONDS = 120
 
 
 def item(key, title, status, detail, evidence=None, required=False, category='network'):
@@ -111,6 +117,47 @@ def browser_media_router_disabled(arguments):
     return 'MediaRouter' in {feature.strip() for feature in disabled.split(',')}
 
 
+def _mutex_exists(name):
+    import ctypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel.OpenMutexW.restype = ctypes.c_void_p
+    handle = kernel.OpenMutexW(0x00100000, False, name)
+    if handle:
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle(handle)
+        return True
+    error = ctypes.get_last_error()
+    if error == 2:
+        return False
+    if error == 5:
+        return True
+    raise OSError('Mutex query failed')
+
+
+def guard_state():
+    """Liveness and block state of the in-use guard; reads only its state files."""
+    try:
+        alive = _mutex_exists(GUARD_MUTEX)
+    except Exception as exc:
+        return {'ok': False, 'error': type(exc).__name__}
+    result = {'ok': True, 'alive': alive, 'age_seconds': None, 'fixed_exit_blocked': None,
+              'repair_active': False}
+    try:
+        state = json.loads((GUARD_DIR / 'network-state.json').read_text(encoding='utf-8'))
+        written = datetime.datetime.fromisoformat(state['time'])
+        result['age_seconds'] = round((datetime.datetime.now(written.tzinfo) - written).total_seconds(), 1)
+        result['fixed_exit_blocked'] = bool(state.get('fixed_exit_blocked'))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        active = json.loads((GUARD_DIR / 'repair-active.json').read_text(encoding='utf-8'))
+        result['repair_active'] = time.time() < float(active.get('expires', 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return result
+
+
 def snapshot():
     """Return only selected process/network fields; never raw command lines."""
     script = r'''
@@ -165,10 +212,11 @@ $result | ConvertTo-Json -Depth 7 -Compress
                 browser['media_router_disabled'] = browser_media_router_disabled(psutil.Process(browser['pid']).cmdline())
             except Exception:
                 browser['media_router_disabled'] = None
+        data['guard'] = guard_state()
         return data
     except Exception as exc:
         return {'process': {'ok': False}, 'tcp': {'ok': False},
-                'physical': {'ok': False}, 'error': type(exc).__name__}
+                'physical': {'ok': False}, 'guard': guard_state(), 'error': type(exc).__name__}
 
 
 def claude_client_kind(path):
@@ -397,10 +445,37 @@ def evaluate_path(p, snap, ctl, disk, probes, route):
     checks.append(item('probe_route', '未知域名的实际入口与路由', 'pass' if route.get('ok') else 'unknown',
                        '将本次 TLS 探测源端口与 Mihomo 连接记录对应；它不冒充 Claude 的真实业务请求。', route, True))
     live = ctl.get('configs', {})
-    checks.append(item('routing_mode', 'TUN、模式与系统代理', 'pass' if ctl.get('ok') else 'unknown',
-                       '这是路由状态记录；开启 TUN 不代表所有流量使用固定出口。',
-                       {'mode': live.get('mode'), 'tun_enabled': live.get('tun', {}).get('enable'),
+    mode, tun = live.get('mode'), live.get('tun', {}).get('enable')
+    # CLI, VS Code and the dedicated browser use the pinned port in every Clash mode.
+    # TUN plus rule mode ("Claude mode") additionally catches Claude traffic that does
+    # not use the port (desktop app, ordinary browsers); "domestic mode" turns TUN off.
+    if not ctl.get('ok'):
+        profile, status, detail = None, 'unknown', '无法读取 Clash 模式。'
+    elif mode == 'rule' and tun is True:
+        profile, status, detail = 'claude', 'pass', 'Claude 模式：规则模式且虚拟网卡开启，没走专用端口的 Claude 流量也按规则进入固定出口。'
+    elif mode == 'rule':
+        profile, status, detail = 'domestic', 'pass', '国内模式：虚拟网卡关闭；CLI、VS Code、专用浏览器照常经专用端口走固定出口，桌面端和普通浏览器不受保护。'
+    else:
+        profile, status, detail = 'abnormal', 'warn', ('Clash 在' + str(mode) + '模式，规则不生效；CLI、VS Code、专用浏览器仍走固定出口，'
+                                                       '桌面端和普通浏览器可能不走。')
+    checks.append(item('routing_mode', 'Clash 模式', status, detail,
+                       {'profile': profile, 'mode': mode, 'tun_enabled': tun,
                         'strict_route': live.get('tun', {}).get('strict-route'), 'system': snap.get('system', {})}))
+    guard = snap.get('guard', {})
+    age = guard.get('age_seconds')
+    if not guard.get('ok'):
+        guard_status, guard_detail = 'unknown', '无法读取使用中守护的状态。'
+    elif not guard.get('alive'):
+        guard_status, guard_detail = 'fail', '使用中守护没有运行；使用过程中出口变化时不会自动断开 Claude。'
+    elif guard.get('fixed_exit_blocked'):
+        guard_status, guard_detail = 'fail', '守护发现固定出口 IP 不符，已阻断 Claude。'
+    elif guard.get('repair_active'):
+        guard_status, guard_detail = 'unknown', '修复正在进行，守护暂停核对；修复结束后重新检查。'
+    elif age is None or not 0 <= age <= GUARD_STALE_SECONDS:
+        guard_status, guard_detail = 'fail', '使用中守护在运行但没有按时更新状态，可能已卡住。'
+    else:
+        guard_status, guard_detail = 'pass', '使用中守护在运行：约每 30 秒核对出口，不符时自动断开 Claude。'
+    checks.append(item('usage_guard', '使用中守护', guard_status, guard_detail, guard, True, 'runtime'))
     physical = snap.get('physical', {})
     checks.append(item('physical', '物理网络', 'pass' if physical.get('ready') else 'warn' if physical.get('ok') else 'unknown',
                        '物理网卡与网关单独记录；探测不通过时不自动重启代理。', physical))
@@ -507,6 +582,31 @@ def applications(p, snap, records):
     return result
 
 
+def desktop_app():
+    """Claude desktop installation only; it is not pinned to the dedicated port."""
+    local = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local')))
+    paths = [p for p in (local / 'AnthropicClaude/claude.exe', local / 'Programs/Claude/Claude.exe') if p.is_file()]
+    paths += sorted(p for p in local.glob('Packages/*Claude*') if p.is_dir())
+    installed = bool(paths)
+    return item('desktop_app', 'Claude 桌面端', 'not_tested' if installed else 'not_running',
+                '已安装；桌面端不走专用端口，只靠 Clash 规则进入固定出口，未做专项验证。' if installed else '未安装 Claude 桌面端。',
+                {'installed': installed, 'paths': [str(p) for p in paths]}, category='application')
+
+
+def client_owners(checks):
+    """Map client-specific configuration checks to 'cli' or 'vscode'; others are shared."""
+    titles = {c['id']: c.get('title', '') for c in checks}
+    owners = {}
+    for c in checks:
+        base = re.match(r'settings-\d+', c['id'])
+        title = titles.get(base.group(0), '') if base else c.get('title', '')
+        if 'VS Code' in title or 'VS Code' in c.get('title', ''):
+            owners[c['id']] = 'vscode'
+        elif 'CLI' in title:
+            owners[c['id']] = 'cli'
+    return owners
+
+
 def summarize(checks, mode='check'):
     checks = list(checks)
     full = mode in ('full_check', 'runtime_full_check')
@@ -534,7 +634,10 @@ def summarize(checks, mode='check'):
     required = [x for x in checks if x.get('required')]
     # Launcher source/build checks also belong to the actual CLI launch gate.
     browser_only = browser_ids | {'browser_tests', 'browser_runtime'}
-    cli_checks = [c for c in required if c['id'] not in browser_only and c.get('category') != 'browser_test']
+    owners = client_owners(checks)
+    client_checks = [c for c in required if c['id'] not in browser_only and c.get('category') != 'browser_test']
+    cli_checks = [c for c in client_checks if owners.get(c['id']) != 'vscode']
+    vscode_checks = [c for c in client_checks if owners.get(c['id']) != 'cli']
     def launch_state(rows):
         if network_state == 'NOT_READY' or any(c['status'] == 'fail' for c in rows):
             return 'NOT_READY'
@@ -542,14 +645,25 @@ def summarize(checks, mode='check'):
             return 'INCOMPLETE'
         return 'READY'
     cli_launch = launch_state(cli_checks)
-    browser_launch = launch_state(required)
+    vscode_launch = launch_state(vscode_checks)
+    browser_launch = launch_state([c for c in required if c['id'] not in owners])
     if browser_launch == 'READY' and not full:
         browser_launch = 'NOT_CHECKED'
+    desktop = next((c for c in checks if c['id'] == 'desktop_app'), None)
+    profile = next((c['evidence'].get('profile') for c in checks if c['id'] == 'routing_mode'), None)
+    desktop_state = ('NOT_CHECKED' if desktop is None else
+                     'NOT_INSTALLED' if not desktop.get('evidence', {}).get('installed') else
+                     'NOT_READY' if network_state == 'NOT_READY' or profile in ('domestic', 'abnormal') else
+                     'UNVERIFIED' if network_state == 'READY' and profile == 'claude' else 'INCOMPLETE')
+    if mode == 'launch_check':
+        # The CLI launcher only needs CLI-relevant evidence; VS Code-only settings do not block it.
+        required = cli_checks
     blockers = [c for c in required if c['status'] != 'pass']
     if runtime and claude != 'pass' and not any(c['id'] == 'claude_runtime' for c in blockers):
         blockers.append(next((c for c in checks if c['id'] == 'claude_runtime'),
                              item('claude_runtime', '运行后请求核验', 'not_tested', '尚无 Claude 实例的真实请求证据。')))
-    split.update(cli_launch_state=cli_launch, browser_launch_state=browser_launch,
+    split.update(cli_launch_state=cli_launch, vscode_launch_state=vscode_launch, browser_launch_state=browser_launch,
+                 entries={'cli': cli_launch, 'vscode': vscode_launch, 'web': browser_launch, 'desktop': desktop_state},
                  assessment='runtime' if runtime else 'before_use',
                  blocking_checks=[{k: c.get(k) for k in ('id', 'title', 'status', 'detail')} for c in blockers])
     failures = [x for x in required if x['status'] == 'fail']
@@ -609,6 +723,7 @@ def collect(install_dir=HERE, workspace=None, full=False, preflight=False, launc
             app_snapshot, records = application_sample(install_dir)
             report['application_sampling_window'] = app_snapshot.get('sampling_window')
             checks += applications(p, app_snapshot, records)
+            checks.append(desktop_app())
         daily = probe(p['daily_port'], 'https://www.cloudflare.com/cdn-cgi/trace')
         # Daily network failure does not redefine fixed egress, but is reported.
         checks.append(item('daily_network', '日常网络入口', 'pass' if daily.get('ok') else 'warn',
@@ -639,20 +754,86 @@ def preflight(install_dir=HERE):
             'failed_checks': [c['id'] for c in report['checks'] if c.get('required') and c['status'] != 'pass']}
 
 
+RESTORE_STEP = '运行 claude-proxy，选 R →「恢复本机代理配置」。'
+BROWSER_IDS = {'browser_fixed_exit', 'browser_webrtc', 'browser_dns', 'browser_tests', 'browser_runtime',
+               'browser-source-flags', 'browser-build-baseline'}
+
+
+def guidance(check, checks):
+    """Plain-language reason and one next step for a blocking check."""
+    key, title = check.get('id', ''), check.get('title', '')
+    full = next((c for c in checks if c.get('id') == key), check)
+    evidence = full.get('evidence', {}) or {}
+    if key == 'usage_guard':
+        if full.get('status') == 'unknown':
+            return '修复正在进行，或无法读取使用中守护的状态。', '稍等 1 分钟后重新检查。'
+        if not evidence.get('alive'):
+            return ('使用中守护没有运行：使用过程中出口变化时，不会自动断开 Claude。',
+                    '运行 claude-proxy，选 R →「启动使用中守护」。')
+        if evidence.get('fixed_exit_blocked'):
+            return ('守护发现固定出口 IP 不符，已自动阻断 Claude。',
+                    '先联系线路供应商确认出口恢复，再' + RESTORE_STEP + '修复会先核对 IP，不符时继续阻断。')
+        return '使用中守护没有按时更新状态，可能已卡住。', '重启电脑（守护随开机启动）后重新检查。'
+    if key == 'fixed_egress':
+        expected = evidence.get('expected_ip')
+        wrong = sorted({p['ip'] for p in evidence.get('probes', []) if p.get('ip') and p['ip'] != expected})
+        if wrong:
+            return ('固定出口 IP 变成了 ' + '、'.join(wrong) + '，不是预期的 ' + str(expected) + '。',
+                    '这是线路供应商那边的变化，本机修不了：恢复前不要使用 Claude，联系供应商恢复原 IP。')
+        return ('固定出口线路暂时连不上（供应商或网络问题）。',
+                '确认网络正常，几分钟后重新检查；持续失败请联系线路供应商。')
+    if key in ('mihomo_core', 'listener_owner', 'controller'):
+        return 'Clash 没有运行，或 Claude 专用端口不可用。', '打开 Clash Verge；仍不通过时' + RESTORE_STEP
+    if key in ('fixed_policy', 'probe_route'):
+        return 'Clash 里 Claude 固定出口的线路配置被改动或无法确认。', RESTORE_STEP
+    if key == 'policy':
+        return '本机检查策略文件缺失或损坏。', '恢复 audit_policy.json 后重新检查；这一步需要人工处理。'
+    if key in BROWSER_IDS:
+        return ('专用浏览器的防护没有确认（' + title + '）。',
+                'CLI / VS Code 不受影响；需要专用浏览器时，运行 claude-proxy，选 R 查看浏览器方案。')
+    if full.get('category') == 'configuration':
+        return title + '未通过。', '加 -Details 查看具体位置；运行 claude-proxy，选 R 查看能否自动恢复。'
+    return title + '：' + check.get('detail', ''), None
+
+
 def display(report, details=False):
     cli = report.get('cli_launch_state', 'INCOMPLETE')
     browser = report.get('browser_launch_state', 'INCOMPLETE')
     runtime = report.get('assessment') == 'runtime'
+    entries = report.get('entries') or {'cli': cli, 'vscode': cli, 'web': browser}
+    clients = [entries.get(k) for k in ('cli', 'vscode', 'web')]
+    usable = [s for s in clients if s == 'READY']
+    blocked = [s for s in clients if s in ('NOT_READY', 'INCOMPLETE')]
     if runtime:
         verdict = '运行后请求核验通过' if report['ready'] else '运行后请求核验未通过或证据不足'
-    elif cli == browser == 'READY':
-        verdict = '可以启动 Claude：CLI / VS Code / 专用浏览器'
-    elif cli == 'READY':
-        verdict = ('CLI / VS Code 可以启动；浏览器尚未检查（需要网页或授权登录时先运行 -Full）' if browser == 'NOT_CHECKED'
-                   else '部分可用：CLI / VS Code 可以启动；专用浏览器暂不要启动')
+    elif usable and not blocked:
+        verdict = '可以使用 Claude'
+    elif usable:
+        verdict = '部分可用：见下表'
+    elif 'NOT_READY' in clients:
+        verdict = '暂不能使用 Claude：按下方「处理」恢复'
     else:
-        verdict = '暂不要启动 Claude：存在错误或必要证据不足'
+        verdict = '无法确认，暂不要使用 Claude：按下方「处理」操作后重新检查'
     print('\n结论：' + verdict)
+    words = {'READY': '可以使用', 'NOT_READY': '暂不能使用', 'INCOMPLETE': '无法确认，暂不要使用'}
+    rows = [('CLI', words.get(entries.get('cli'), '无法确认，暂不要使用')),
+            ('VS Code', words.get(entries.get('vscode'), '无法确认，暂不要使用')),
+            ('网页版', '可以使用（只用桌面「Claude 专用浏览器」）' if entries.get('web') == 'READY' else
+                       '未检查：打开「Claude 专用浏览器」时会自动检查' if entries.get('web') == 'NOT_CHECKED' else
+                       words.get(entries.get('web'), '无法确认，暂不要使用'))]
+    desktop = entries.get('desktop')
+    if desktop in ('NOT_INSTALLED', 'UNVERIFIED', 'NOT_READY', 'INCOMPLETE'):
+        rows.append(('桌面端', {'NOT_INSTALLED': '未安装',
+                               'UNVERIFIED': '未专门验证：只靠 Clash 规则保护，建议改用上面三种',
+                               'NOT_READY': '不受保护：只有 Claude 模式（虚拟网卡开）下才走固定出口'}.get(desktop) or words[desktop]))
+    if not runtime:
+        routing = next((c for c in report['checks'] if c['id'] == 'routing_mode'), {})
+        profile = routing.get('evidence', {}).get('profile')
+        print('当前模式：' + {'claude': 'Claude 模式（虚拟网卡开）',
+                              'domestic': '国内模式（虚拟网卡关）：CLI、VS Code、专用浏览器照常走固定出口',
+                              'abnormal': '异常：Clash 不在规则模式；在 Clash Verge 切回「规则」'}.get(profile, '未知'))
+        for name, state in rows:
+            print('  ' + name + '：' + state)
     print('检查时间：' + report['started_at'] + ' | 版本 ' + report.get('version', VERSION))
     fixed = next((c for c in report['checks'] if c['id'] == 'fixed_egress'), None)
     if fixed:
@@ -665,19 +846,27 @@ def display(report, details=False):
     if tested:
         names = {'browser_fixed_exit': '出口', 'browser_webrtc': 'WebRTC', 'browser_dns': 'DNS'}
         print('临时浏览器：' + '；'.join(names[c['id']] + ' ' + labels.get(c['status'], c['status']) for c in tested))
-        if any(c['id'] == 'browser_dns' and c['status'] != 'pass' for c in tested):
-            print('DNS 为补充观察；未完成时保留未知，不据此认定存在泄漏。')
     blockers = report.get('blocking_checks', [])
+    guard_blocked = any(c.get('id') == 'usage_guard' and c.get('evidence', {}).get('fixed_exit_blocked')
+                        for c in report['checks'] if c.get('status') == 'fail')
+    shown = set()
     for c in blockers:
-        print('原因：' + c['title'] + ' — ' + c['detail'])
-    if not runtime:
-        print('无需打开 Claude；本次结果判断使用前环境，不要求真实账号请求。')
-    else:
-        print('运行后核验是可选补充；使用前检查用 claude-proxy -Full，无需启动 Claude。')
+        # A guard block makes the fixed group REJECT; its downstream symptoms are not separate causes.
+        if guard_blocked and c['id'] in ('fixed_policy', 'fixed_egress', 'probe_route'):
+            continue
+        reason, step = guidance(c, report['checks'])
+        if (reason, step) in shown:
+            continue
+        shown.add((reason, step))
+        print('原因：' + reason)
+        if step:
+            print('处理：' + step)
+    if runtime:
+        print('运行后核验是可选补充；使用前检查直接运行 claude-proxy，无需启动 Claude。')
     print('状态：' + report['state'] + '；退出码 ' + str(report['exit_code']))
     if not details:
-        print('详情：claude-proxy ' + ('-Full ' if 'full' in report.get('mode', '') else '') +
-              ('-Runtime ' if runtime else '') + '-Details；JSON：加 -Json')
+        print('逐项证据：claude-proxy ' + ('-Full ' if 'full' in report.get('mode', '') else '') +
+              ('-Runtime ' if runtime else '') + '-Details')
         return
     print('\n--- 逐项证据 ---')
     print(f"Claude 代理检查 {VERSION} | {report['started_at']}")

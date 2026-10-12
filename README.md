@@ -1,144 +1,178 @@
-# Proxy
+# Proxy：Claude 固定出口
 
-Windows 上的 Claude 固定出口检查、专用启动入口和本机恢复工具。当前归档版本：`2026.10.07.1`，报告 schema 为 `4`。
+在这台 Windows 工作站上，让 Claude 始终经指定代理、从固定公网 IP 访问。条件不满足时阻断访问并明确告知，不悄悄直连、不切换出口；使用前就能知道能不能用，出问题时知道怎么恢复。
 
-**可以复用源码、回归测试和检查方法；当前版本不是换电脑后一键安装的通用工具。** 部分路径、端口、节点名和恢复逻辑针对原工作站编写。部署前需要核对下文的本机依赖。
+版本 `2026.10.07.2`。**这是为原工作站定制的工具，不是通用安装包**：路径、端口、节点名和恢复逻辑都按本机编写，迁移前要先看「迁移须知」。
 
-## 检查什么
+## 日常使用
 
-- 读取当前 Clash / Mihomo 进程、监听端口所属进程、实时控制器状态和固定出口候选链。
-- 通过两处独立公网服务核对预期出口 IP；其中一处失败不会算完整通过。
-- 可选 `-Runtime` 模式将运行中的 Claude CLI / VS Code 客户端 TCP 连接与 Mihomo 的实际请求和路由链对应；逐个实例判断。
-- 核对 Claude、VS Code、项目设置、环境变量、第三方 API 覆盖及启动入口。
-- 完整模式用临时未登录 Chrome 检查公网出口、原生 WebRTC 和 DNS。WebRTC 包含有效管理策略、STUN 正对照和实际连接观察；DNS 要求观察动态测试开始和结束。
-- 专用浏览器启动前检查固定出口和 WebRTC 保护，并禁用 QUIC、非代理 WebRTC UDP 和 MediaRouter 投屏发现。
+**两种模式**：用 Clash Verge 托盘菜单里的「虚拟网卡模式」开关切换。两种模式下 Clash 都保持「规则」模式并保持运行，系统代理建议一直开着。
 
-`claude-proxy` 和 `claude-proxy -Full` 用于使用前检查，不需要先打开 Claude；未运行或没有应用请求不会使预检失败。默认输出简短结论和下一步。默认检查通过表示 CLI 条件就绪；`-Full` 的必要项全部通过后，可以启动 CLI 和专用浏览器。
-
-检查会产生探测流量，但不启动 Claude 或 Clash、不修复配置、不切节点，也不以旧报告代替当前证据。`-Full` 只另启临时未登录 Chrome。浏览器必要保护无法确认时仍返回 `INCOMPLETE`，并明确区分“CLI 可启动”和“专用浏览器暂不要启动”，不会把未知改成通过。
-
-正常终端检查后提供菜单：`R` 查看修复方案、`D` 查看详情、`C` 重新检查、`Q` 结束。输入方案编号后先显示改动、影响、预期结果和恢复方式，只有再输入 `YES` 才执行；查看方案、取消或退出均不修改配置。脚本可用 `-NoPrompt` 禁用菜单，`-Json`、兼容参数 `-CheckOnly` 自动不交互。
-
-目前提供两个具体方案：
-
-| 方案 | 何时适用 | 改动与边界 |
+| | Claude 模式（虚拟网卡开） | 国内模式（虚拟网卡关） |
 | --- | --- | --- |
-| 恢复本机代理配置 | 检查确认本地内核、入口或受管理配置有问题，且原恢复依赖齐全 | 调用原恢复后端，可能启动 / 重载 Clash 并恢复受管理分流；不承诺修复供应商、账号或物理网络。原后端保留 DPAPI 文件备份。 |
-| 设置 Chrome WebRTC 保护 | 确认策略值或来源有问题、当前用户缺少期望值，且无机器级冲突或 URL 特例 | 先备份，再只写当前用户的一个 Chrome 策略值。影响该用户全部 Chrome 资料及 WebRTC 通话；不改 HKLM、不删 URL 特例、不自动关闭浏览器。执行结果提供单值回滚命令。 |
+| 国内 App（三角洲行动、飞书等） | 按规则直连 | 正常使用，等同于关闭 VPN |
+| CLI / VS Code / 专用浏览器 | 固定出口 | 固定出口（专用端口与虚拟网卡无关） |
+| 桌面端 / 普通浏览器 | 按规则进入固定出口 | 不受保护 |
 
-如果当前用户策略已经正确、但 Chrome 实际来源仍未确认，菜单会说明不能靠重复写入承诺修复，要求重新检查或进一步诊断。备份失败不会继续写策略；回滚也不会覆盖后续的其他修改。修复执行完会重新检查，命令执行成功不等于环境验收成功。
+**看状态**：右下角的状态图标，开机自动显示。
 
-## 文件
-
-| 路径 | 用途 |
+| 图标 | 含义 |
 | --- | --- |
-| `claude-network/audit_proxy.py` | 统一检查入口、实时证据和退出状态 |
-| `claude-network/audit_actions.py` | 显式确认后的修复方案、Chrome 单值备份和回滚 |
-| `claude-network/audit_settings.py` | 配置和启动入口检查 |
-| `claude-network/audit_browser.py`、`webrtc_probe.py`、`stun_probe.py` | 浏览器出口、WebRTC 和 DNS 检查 |
-| `claude-network/browser_entry.py`、`ClaudeBrowser.cs` | 专用浏览器门禁和 Windows 启动器 |
-| `claude-network/repair_proxy.py`、`repair_support.py`、`routing-baseline.js` | 原工作站的配置恢复逻辑 |
-| `claude-network/test_*.py` | 离线回归测试及本地 PowerShell / Node 兼容性检查 |
-| `claude-network/vendor/jsonc-parser/` | 随源码保存的 JSONC 解析器，附原 MIT 许可证 |
-| `Build-ClaudeBrowser.ps1` | 仅编译启动器并生成本地 SHA-256 基线 |
-| `Deploy-ClaudeAudit.ps1` | 原工作站已有安装的增量更新脚本 |
-| `Validate-ClaudeAudit.ps1` | 对已安装命令执行检查，记录配置和进程是否保持不变 |
+| 绿 C | Claude 模式，可以使用 |
+| 蓝「国」 | 国内模式，CLI / VS Code / 专用浏览器可以使用 |
+| 橙 … | 出口暂未确认，正在复查；或检测已恢复，等待第二轮成功 |
+| 红 ! | 固定出口连续两轮检测失败、IP 不符已阻断、守护异常，或 Clash 模式异常 |
+| 灰 | 没有网络 |
 
-## 从仓库准备源码
+- 右键可以看到各入口的状态和上次核对时间，还能打开 Clash Verge、做完整检查、打开专用浏览器。
+- 单次检测失败和恢复观察不弹提示；连续两轮失败通知一次，之后连续两轮成功再通知恢复。IP 不符、守护停止、状态过期和模式异常仍立即告警。
+- 图标每 5 秒刷新，但失败/成功计数只由后台每轮实际检测更新，同一份结果不会重复计数。
 
-本机验证环境为 Windows、Python `3.13.4`、Node.js `24.14.0`、Chrome `154.0.8037.93`、Windows PowerShell `5.1`、Clash Verge Rev `2.5.6`、Mihomo `1.19.31`。源码使用 `asyncio.timeout`，因此 Python 至少需要 `3.11`；其他版本组合尚未验证。
+**入口**：
 
-在仓库根目录执行：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-
-# 只在还没有本机策略文件时复制，避免覆盖已有配置。
-if (-not (Test-Path .\claude-network\audit_policy.json)) {
-    Copy-Item .\claude-network\audit_policy.example.json .\claude-network\audit_policy.json
-}
-
-.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s .\claude-network -p 'test_*.py'
-```
-
-示例中的 `203.0.113.10` 是文档占位地址，必须改成自己的预期固定公网出口；测试通过不会替你建立代理。测试使用独立样本，不需要运行 Clash 或登录 Claude，部分测试会调用本机 PowerShell / Node。浏览器检查使用已安装的 Chrome，不要求额外执行 `playwright install`。
-
-仓库不保存编译后的启动器。先核对 `ClaudeBrowser.cs` 中的 Python 路径，再执行：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-ClaudeBrowser.ps1
-```
-
-构建需要 Windows 自带的 .NET Framework C# 编译器，生成 `claude-network/ClaudeBrowser.exe` 和 `browser-build.json`。哈希仅用于检测本地构建漂移，不是供应商签名。构建脚本不会部署、启动浏览器或修改网络。
-
-## 换电脑前要调整的内容
-
-| 项目 | 当前约定和迁移要求 |
+| 入口 | 用途 |
 | --- | --- |
-| Python | PowerShell / CMD 入口使用 `C:\Tools\Python\python.exe`，C# 使用 `C:\Tools\Python\pythonw.exe`；须改成实际安装路径。仅创建虚拟环境不会自动改这些入口。 |
-| 安装与桌面路径 | 部分入口、部署和验证脚本仍含 `C:\Users\example`、`C:\Users\example\Desktop` 及原项目工作目录。安装目录约定为 `%USERPROFILE%\.codex\ClaudeNetwork`。 |
-| 代理参数 | 示例策略集中保存出口 IP、端口和组名，但不是所有常量的唯一来源。`browser_entry.py`、`claude-fixed.cmd`、`route_verify.py`、`repair_proxy.py`、`routing-baseline.js` 和部分进程识别逻辑仍含固定端口或组名，迁移时须同步核对。 |
-| Clash | 依赖 Clash Verge Rev 的数据目录和 `verge-mihomo-production-*` Windows 命名管道；不是任意 Mihomo 控制器的通用客户端。恢复后端还固定了 Clash 安装路径、订阅 / 脚本 UID 和前置节点名。 |
-| Chrome | 正式浏览器路径为 `C:\Program Files\Google\Chrome\Application\chrome.exe`，专用资料约定为 `%LOCALAPPDATA%\ClaudeNetwork\ChromeData`。 |
-| WebRTC 策略 | 当前门禁要求实际生效的 `WebRtcIPHandling=disable_non_proxied_udp` 来自 `managed`，且没有 URL 特例；仅有启动参数不够。工具不会自动建立或修改 Chrome 全局管理策略。 |
-| Claude / VS Code | 需要已安装的官方客户端和指向专用入口的实际设置。登录状态、客户端及账号资料不随仓库分发。 |
+| 终端里直接运行 `claude` 或 VS Code 插件 | `~/.claude/settings.json` 已把代理固定到专用端口，不需要额外操作 |
+| 桌面「Claude CLI 固定出口」 | 先检查当前目录的设置和出口，通过后才启动 CLI |
+| 桌面「Claude 专用浏览器」/「Claude 打开授权链接」 | 网页版只用它。每次打开前检查固定出口和 WebRTC 防护，不通过就不打开 |
+| 桌面「代理网络检查」 | 完整检查（约 1 分钟），按入口列出能不能用 |
 
-`Deploy-ClaudeAudit.ps1` 要求原安装目录和四个桌面快捷方式已经存在。它是增量更新脚本，复制清单没有包含全部修复依赖；不能用作新机器安装器。其 `-RestoreOriginalShortcutWorkingDirectories` 参数另外依赖原机器的历史备份，不属于仓库恢复能力。
-
-**不要把 `-Repair` 当作首次安装命令。** 它还需要本机 `repair-baseline.dpapi`、现存 Clash 配置及凭据，以及仓库之外的 `%USERPROFILE%\.codex\CodexNetworkGuard\health_monitor.py`。DPAPI 基线与 Windows 用户环境关联，不是跨机备份。恢复逻辑也涉及 Google、X、OpenAI 的分流；迁移前应核对整个 `routing-baseline.js`。普通只读检查不需要该 DPAPI 基线或外部守护模块。
-
-## 已安装环境的使用方法
+**检查命令**：
 
 ```powershell
-claude-proxy                         # 使用前检查，不需要打开 Claude
-claude-proxy -Full                   # 加查浏览器保护，通过后可启动专用浏览器
-claude-proxy -Details                # 查看逐项检查和详细证据
-claude-proxy -NoPrompt               # 禁用终端交互菜单
-claude-proxy -Runtime                # 可选：自己启动并使用 Claude 后核验实际连接
-claude-proxy -Runtime -Full -Details # 运行后核验，同时补测浏览器并显示详情
-claude-proxy -LaunchCheck            # 桌面 CLI 启动入口使用的条件检查
-claude-proxy -Workspace 'D:\MyProject'
-claude-proxy -Full -Json -Output '.\proxy-audit.json'
-claude-proxy -Repair                 # 仅在本机恢复依赖齐全时显式执行
+claude-proxy           # 使用前检查，几秒钟；结束后可选 R 修复 / D 详情 / C 重查 / Q 结束
+claude-proxy -Full     # 另启临时未登录 Chrome，提前检查网页版
+claude-proxy -Details  # 显示逐项证据
+claude-proxy -Repair   # 恢复本机受管理的代理配置并重新检查（可能重启 Clash）
 ```
 
-`-Runtime` 是可选的启动后检查，不是预检前提，也不会启动应用。此模式要求每个运行中的 Claude 实例都有可关联的请求；未运行、空闲或证据不足时保留 `INCOMPLETE / 3`。它可以与 `-Full`、`-Details` 同用，不能与 `-LaunchCheck`、内部 `--preflight` 或 `-Repair` 混用。`-LaunchCheck` 也不能与 `-Full` 或 `-Repair` 混用。
+输出示例：
 
-`-Details` 只影响文字显示，不改变通过标准；`-Json` 始终包含完整结构化证据并自动关闭交互。需要稳定退出码的脚本调用应使用 `-NoPrompt` 或 `-Json`。
-
-从源码直接调用审计器可以指定安装目录和实际项目，不依赖系统 PATH 中的旧命令：
-
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -B .\claude-network\audit_proxy.py `
-    --install-dir .\claude-network --workspace 'D:\MyProject' --full --no-prompt
+```text
+结论：可以使用 Claude
+当前模式：Claude 模式（虚拟网卡开）
+  CLI：可以使用
+  VS Code：可以使用
+  网页版：未检查：打开「Claude 专用浏览器」时会自动检查
+  桌面端：未安装
+固定出口：203.0.113.10；独立检测 2/2 通过
+状态：ENVIRONMENT_READY；退出码 0
 ```
+
+不能使用时，每条「原因」下面会给出一行「处理」。更完整的白话说明见 [使用说明](claude-network/使用说明.txt)。
+
+## 怎么做到的
+
+| 层 | 作用 | 位置 |
+| --- | --- | --- |
+| 数据面 | Clash 专用端口 `127.0.0.1:17892` 固定连到「Claude-固定出口」组，组里只有「固定出口链路」和 `REJECT`。所有备用链路都通往同一台固定 IP 的 SOCKS5 服务器，没有直连兜底。端口或链路不可用时请求直接失败。规则还把 Anthropic / Claude 域名和 `claude.exe` 进程导向同一组。 | `routing-baseline.js`（Clash Verge 脚本） |
+| 客户端 | Claude 用户设置和 VS Code 设置的代理指向 17892；`BROWSER` 指向专用浏览器启动器。专用浏览器带 `--proxy-server`，并关闭 QUIC、非代理 UDP 和投屏发现。 | `browser_entry.py`、`ClaudeBrowser.cs` |
+| 使用中守护 | 约每 30 秒经 17892 核对出口。IP 不符时把 Claude、Google、X 固定出口组切为 `REJECT` 并断开已有连接，一直保持到显式修复，同时弹窗提醒；Clash 离开规则模式时也会弹窗。`guard.ps1` 每 30 秒确认它在运行，不在就重新拉起。 | `CodexNetworkGuard/` |
+| 状态图标 | 每 5 秒读取守护的状态文件和互斥量，显示模式与可用性。不发网络请求，也不改任何设置。 | `ClaudeStatus.cs` |
+| 使用前检查 | 核对 Clash 内核与端口归属、固定出口策略、两处独立公网检测、实际路由、守护状态、Claude / VS Code 设置；`-Full` 另用临时 Chrome 检查网页出口、WebRTC 和 DNS。结果按入口给出。 | `audit_proxy.py`、`audit_settings.py`、`audit_browser.py`、`webrtc_probe.py` |
+| 修复 | 恢复受管理的 Clash 配置、代理组和客户端设置。先经只供检查用的 `127.0.0.1:17893` 核对出口，正确才放开 Claude；不符或无法确认时继续阻断。 | `repair_proxy.py`、`audit_actions.py` |
+
+**网页版的 WebRTC 判定**：Chrome 实际生效的设置必须是 `disable_non_proxied_udp`，且没有按网址的例外；独立 STUN 对照有响应，浏览器原生 ICE 完成，没有异常候选地址，也没有发出 STUN UDP。设置来源接受两种：
+
+- Chrome 强制策略；
+- 命令行设置，并且专用浏览器资料里没有能改写该设置的扩展（持有 `privacy` 权限或存有 WebRTC 偏好）。
+
+专用资料登录 Google 账号后，扩展会随同步进入，所以每次打开都会重新核查。
+
+**结果与退出码**：
 
 | 状态 / 退出码 | 含义 |
 | --- | --- |
-| `ENVIRONMENT_READY / 0` | 使用前必要检查通过；默认模式可启动 CLI，`-Full` 还确认浏览器必要保护 |
-| `CLAUDE_OBSERVED / 0` | 仅 `-Runtime`：必要检查通过，当前运行的 Claude 实例均已关联真实请求 |
-| `LAUNCH_READY / 0` | 启动条件满足，不代表应用真实请求已验证 |
-| `PROXY_READY / 0` | 内部网络预检通过，仅供门禁和兼容入口使用 |
-| `NOT_READY / 2` | 存在明确错误 |
-| `INCOMPLETE / 3` | 本模式必要证据不足；只有 `-Runtime` 要求应用真实请求证据，普通预检不因 Claude 未运行而进入此状态 |
+| `ENVIRONMENT_READY / 0` | 使用前检查通过；各入口以输出列表或 JSON `entries` 为准 |
+| `LAUNCH_READY / 0` | CLI 启动条件满足（只看 CLI 相关项） |
+| `PROXY_READY / 0` | 网络预检通过，供专用浏览器入口使用 |
+| `CLAUDE_OBSERVED / 0` | 仅 `-Runtime`：运行中的 Claude 实例都已关联到真实请求 |
+| `NOT_READY / 2` | 存在明确问题 |
+| `INCOMPLETE / 3` | 证据不足，不把未知当成通过 |
 
-关闭 Clash 窗口与停止 Mihomo 服务不同；界面消失但内核仍在运行时，代理可能仍正常。详情见 [使用说明](claude-network/使用说明.txt)。
+## 仓库结构
 
-## 本机验收记录
+| 路径 | 内容 |
+| --- | --- |
+| `claude-network/audit_proxy.py` | 检查入口、判定与输出 |
+| `claude-network/audit_settings.py` | Claude / VS Code / 环境变量等配置检查 |
+| `claude-network/audit_browser.py`、`webrtc_probe.py`、`stun_probe.py` | 临时浏览器的出口、WebRTC、DNS 检查 |
+| `claude-network/audit_actions.py` | 菜单修复方案：恢复配置、启动守护、Chrome 单值策略（含备份与回滚） |
+| `claude-network/repair_proxy.py`、`repair_support.py`、`repair_jsonc.cjs`、`route_verify.py` | 恢复后端 |
+| `claude-network/routing-baseline.js` | Clash 路由基线，同时管理 Google、X、OpenAI 分流 |
+| `claude-network/network_check.py` | 守护、修复和浏览器入口共用的出口探测 |
+| `claude-network/browser_entry.py`、`ClaudeBrowser.cs`、`Open-ClaudeBrowser.ps1` | 专用浏览器门禁与启动器 |
+| `claude-network/ClaudeStatus.cs` | 托盘状态图标 |
+| `claude-network/claude-fixed.cmd`、`claude-proxy.cmd`、`Repair-ClaudeProxy.ps1`、`Network-Check.cmd` | 命令与桌面入口 |
+| `claude-network/test_*.py` | 离线回归测试 |
+| `claude-network/vendor/jsonc-parser/` | JSONC 解析器（MIT 许可证） |
+| `CodexNetworkGuard/` | 使用中守护：`health_monitor.py`、`guard.ps1`、`run-hidden.vbs`。`guard.ps1` 还维护 Codex 的代理设置 |
+| `Build-ClaudeBrowser.ps1`、`Build-ClaudeStatus.ps1` | 用系统自带的 .NET Framework 编译器生成两个 exe |
+| `Deploy-ClaudeAudit.ps1` | 把仓库文件增量部署到已有安装（先备份，不重启进程） |
+| `Validate-ClaudeAudit.ps1` | 跑一次检查，并确认配置和 Clash 进程保持不变 |
 
-2026-10-06 对 `2026.10.06.6` 完成了 122 项回归检查，以及 CLI 实际模型请求、VS Code 新会话、专用浏览器真实出口 / WebRTC / 网站路由验证。另测试了有时限的代理入口故障和恢复，以及实际固定出口策略设为拒绝时，检查命令和启动门禁能否阻止继续使用。
+## 构建、测试与部署（本机）
 
-当时最终完整检查仍为 `INCOMPLETE / 3`：网络、专用浏览器、WebRTC 和 DNS 项通过，但另一个既有空闲 VS Code 实例没有真实请求证据。这个状态没有被改写成全通过。
+```powershell
+py -m pip install -r requirements.txt          # psutil、PyYAML、playwright；Python ≥ 3.11
+py -X utf8 -B -m unittest discover -s .\claude-network -p "test_*.py"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-ClaudeBrowser.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-ClaudeStatus.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\claude-network\Test-ClaudeStatus.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-ClaudeAudit.ps1
+```
 
-`2026.10.07.1` 将使用前环境检查与可选的 `-Runtime` 请求核验分开，默认命令不再要求先启动 Claude。2026-10-07 已在 Claude 和专用浏览器均关闭时，从 `C:\Users\example` 实测正式 `claude-proxy -Full`：`ENVIRONMENT_READY / 0`，CLI 与浏览器启动条件均为 `READY`，配置、Clash 进程和 Chrome 策略保持不变。
+- 测试需要本机的 `claude-network/audit_policy.json`（从 `audit_policy.example.json` 复制，再改成自己的固定 IP），不需要运行 Clash，也不需要登录 Claude。
+- 部署目标：`%USERPROFILE%\.codex\ClaudeNetwork`（检查与修复）和 `%USERPROFILE%\.codex\CodexNetworkGuard`（守护）。
+- 部署后要重启 `guard.ps1` 和守护进程才会加载新代码；路由基线有改动时，需运行一次 `claude-proxy -Repair` 写入 Clash。
+- 开机启动项：`CodexNetworkGuard.lnk`（守护）、`ClaudeStatus.lnk`（状态图标）。
 
-本版共 167 项回归通过，包括交互取消 / 确认、修复后重检、中断、先备份再写入及受限回滚。修复写入行为使用隔离测试，本轮未为了验证菜单而改写实际网络或 Chrome 策略。这不等于重跑了上述历史模型请求验收。原始运行报告只保留在本机，仓库中的说明是当次验收摘要，不代表将来或其他电脑的运行状态。
+## 迁移须知
 
-这些短测不证明永久固定 IP、任意工具 / MCP / WSL / SSH 统一出口、所有未来请求、重启后的长期稳定或账号风控结果。
+| 项目 | 本机约定 |
+| --- | --- |
+| Python | `C:\Tools\Python\python.exe` / `pythonw.exe` 写死在命令入口、C# 启动器和 `guard.ps1` 里 |
+| Clash | Clash Verge Rev（`C:\Tools\ClashVerge`）及其 `verge-mihomo-production-*` 命名管道；恢复后端固定了订阅 / 脚本 UID 和前置节点名；端口为 17892（专用）、17893（检查）、7892（日常） |
+| 固定出口 | 预期 IP、端口和组名写在 `audit_policy.json`；部分脚本里仍有写死的端口和组名 |
+| 用户与路径 | `C:\Users\example`、`C:\Users\example\Desktop`；守护和图标的互斥量名带 `example` |
+| Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe`，专用资料在 `%LOCALAPPDATA%\ClaudeNetwork\ChromeData` |
+| 恢复 | 需要本机的 `repair-baseline.dpapi`（跟随 Windows 用户，不能跨机）、现有 Clash 配置和凭据、Node.js。它不是首次安装工具 |
+
+## 域名补漏（本机，2026-10-08）
+
+- 根据 [Claude 官方网络要求](https://code.claude.com/docs/en/desktop#network-access-requirements)，新增 `claudemcpcontent.com`（交互式 MCP 内容）和 `claude.app`（含预览内容子域名）的后缀规则，均进入 `Claude-固定出口`。
+- Auth0 核查：当前公共入口的 `auth0.com` 规则仍指向 OpenAI 日常代理；本机 Claude Code 2.1.293、现有日志和当时活动连接中未发现 `anthropic.auth0.com`，本次查阅的官方认证清单也未列出它。这不证明所有客户端都不使用该地址；本次没有添加未经确认的 Auth0 例外。
+- 仅增加上述两条规则；没有新增宽泛关键词、IP / ASN 规则或直连兜底，原有规则顺序和代理组选择保持不变。
+- 201 项现有回归测试通过；规则生成可重复运行。已同步安装脚本和 Clash 当前脚本，并热加载到 Mihomo：运行规则从 3902 条变为 3904 条，内核进程未重启。
+- 更新前后分别经专用入口使用 Cloudflare、ipify 核对，均为预期固定出口。本次验证覆盖规则加载和出口，未执行 Claude 登录、模型请求或真实 MCP 内容加载。
+
+## 状态图标修复验证（本机，2026-10-08）
+
+- 修复单轮探测失败立即红色告警、一次恢复立即弹窗的问题；以真实检测轮次确认故障和恢复，硬故障仍立即告警。
+- 保留已安装版本的原生图标句柄释放修复，相同图标不重复绘制；健康日志保留主、备出口检测的结果、错误类型和耗时。
+- 201 项 Python 回归测试通过，状态判定及通知策略的 105 个离线断言通过。
+- 定点更新状态程序和健康监控，Clash 内核 PID 与代理配置校验值保持不变。12:14:47—12:15:55 连续三轮出口检查通过，另经 Cloudflare 与 ipify 独立确认出口一致。
+- 这次修复覆盖状态判断和提示；日志中的真实链路超时不能仅靠本次短时通过判定已消除。
+
+## 验证记录（本机，2026-10-07）
+
+- 194 项离线回归测试通过。
+- 停掉守护监控后检查返回 `NOT_READY / 2`，`guard.ps1` 当秒重新拉起；守护和监控都停掉时，菜单「启动使用中守护」14.3 秒恢复。
+- `claude-proxy -Repair` 先经 17893 两处核对出口为预期 IP，再放开 Claude；17893 实际链路为「静态出口-自动恢复 → 静态IP-链式」。
+- `claude-proxy -Full` 为 `ENVIRONMENT_READY / 0`：CLI、VS Code、网页版可用；专用浏览器门禁 `ready`，CLI 门禁 `LAUNCH_READY / 0`。
+- 状态图标对 7 种模拟状态及状态文件缺失的判定全部正确。
+- **未实测**：真实切换虚拟网卡或 Clash 模式时的图标与弹窗、真实出口变化时的阻断。这些逻辑由离线测试覆盖。
+
+以上只说明当次本机状态，不代表以后，也不代表其他电脑。
+
+## 边界
+
+- 守护约每 30 秒核对一次，出口变化后最多约 30 秒才会阻断。
+- Clash 被切到全局或直连时只提醒、不阻断；国内模式下桌面端和普通浏览器里的 Claude 不受保护。
+- 不保证账号权益、地区资格、免封禁或供应商永久静态 IP。
+- 任意工具、MCP、WSL、SSH 和普通浏览器不在统一出口保证之内。
+- 不读取 Cookie，不登录也不调用模型；配置凭据只在内存里比较，不输出、不另存。
 
 ## 保存范围
 
-仓库保存源码、测试、示例策略、构建和使用说明。`.gitignore` 排除真实策略 JSON、配置 YAML、DPAPI、浏览器资料、生成程序、快捷方式、部署备份、日志和运行报告；本机这些文件仍保留。
-
-源码仍包含原工作站路径、节点名和部分历史目标地址，因此按私有仓库保存。这里没有代理密码、订阅链接、访问 token 或 Claude 登录资料，也不提供这些资料的恢复能力。不要用 `git add -f` 绕过排除规则上传本机配置。
+仓库只保存源码、测试、示例策略和文档。`.gitignore` 排除了真实策略 JSON、Clash 配置、DPAPI 文件、浏览器资料、编译出的 exe、快捷方式、部署备份、日志和运行报告。源码里含原工作站的路径和节点名，请按私有仓库保存，不要用 `git add -f` 绕过排除规则。

@@ -5,9 +5,11 @@
 !/README.md
 !/requirements.txt
 !/Build-ClaudeBrowser.ps1
+!/Build-ClaudeStatus.ps1
 !/Deploy-ClaudeAudit.ps1
 !/Validate-ClaudeAudit.ps1
 !/claude-network/
+!/CodexNetworkGuard/
 
 # Workstation settings, credentials, generated binaries and runtime evidence.
 *.json
