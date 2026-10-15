@@ -8,6 +8,8 @@
 !/Deploy-ClaudeAudit.ps1
 !/Validate-ClaudeAudit.ps1
 !/claude-network/
+!/assets/
+!/assets/**
 
 # Workstation settings, credentials, generated binaries and runtime evidence.
 *.json
