@@ -1,0 +1,9 @@
+# tests/
+> L2 | 父级: ../CLAUDE.md
+identities.html: 独立 Vite 测试入口，生产 rollup 只含 index/browser，不打包本页。
+identities-fixture.tsx: 真实 IdentityPanel/Cromma/Motion/TooltipProvider + Tauri 官方 mockIPC；40 个虚构账号，仅内存模拟切换/重命名/删除/失败/恢复与中英文，不读取任何本机账号。
+执行入口 ../scripts/test-identities-ui.ts 使用 Node.js 原生管道及临时 HOME/XDG/浏览器上下文、阻止外网、保留真实 DOM 输入；不采集截图或用户目录。
+[PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+proxy.html / proxy-fixture.tsx：固定出口首页的纯内存 IPC 样本；不进入生产构建，覆盖正常、阻断、过期、读失败、守护恢复中、运行中连接与 Clash 模式提醒、环境一致性、客户端保护、登录链接入口失效不影响网页版和确认动作。
+connections.html / connections-fixture.tsx：连接监视页的纯内存快照样本，覆盖无连接、全部固定出口、走偏标红、Clash 读不到、国内模式与停止轮询。

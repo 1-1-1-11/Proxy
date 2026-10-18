@@ -1,0 +1,401 @@
+# [INPUT]: release 分支 commit、锁定依赖与 GitHub Secrets 中的 Apple 与更新签名凭据。
+# [OUTPUT]: macOS 双应用 DMG、Linux DEB/RPM/AppImage/Arch 包、Windows 当前用户 NSIS 安装器、带版本签名的主程序更新与公开清单、SHA-256、递增版本 tag 和 GitHub Release。
+# [POS]: 自动发布入口；签名和发布权限分离，仅仓库所有者触发/重跑，拒绝 fork、PR 或其他发布者。
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+name: Release
+on:
+  push:
+    branches: [release, review/windows-ready]
+  workflow_dispatch:
+    inputs:
+      installer_run:
+        description: 'Owner-only Windows verification: prior installer run ID (review branch only)'
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: read
+env:
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+jobs:
+  version:
+    if: github.repository == 'liseami/CCBaga' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/review/windows-ready') && github.actor == 'liseami' && github.triggering_actor == 'liseami'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Compute release version
+        id: version
+        env:
+          INSTALLER_RUN: ${{ inputs.installer_run }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          replay = os.environ.get('INSTALLER_RUN', '')
+          if replay and (os.environ['GITHUB_REF'] != 'refs/heads/review/windows-ready' or not replay.isdigit()):
+            raise SystemExit('Installer replay is restricted to the owner-only review branch')
+          major, minor, patch = map(int, json.load(open('package.json'))['version'].split('.'))
+          version = f'{major}.{minor}.{patch + int(os.environ["GITHUB_RUN_NUMBER"])}'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write(f'version={version}\ntag=v{version}\n')
+          PY
+  build:
+    needs: version
+    if: github.repository == 'liseami/CCBaga' && github.ref == 'refs/heads/release' && github.actor == 'liseami' && github.triggering_actor == 'liseami'
+    runs-on: macos-15
+    timeout-minutes: 120
+    outputs:
+      version: ${{ needs.version.outputs.version }}
+      tag: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Prepare locked toolchain and engine
+        run: |
+          test "$(uname -m)" = arm64
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          bun install --frozen-lockfile
+          python3 -m pip install --require-hashes --only-binary=:all: -r scripts/release-requirements.txt
+          python3 scripts/fetch-browser.py
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+      - name: Run checks
+        run: |
+          bun test
+          bun run build
+          bun run test:identities
+          identity_test="$RUNNER_TEMP/ccbaga-identity-test"
+          clang -fobjc-arc -framework Foundation -framework Security src-tauri/native/IdentityTests.m -o "$identity_test"
+          "$identity_test"
+          rm -f "$identity_test"
+          bun scripts/test-skill-install.ts
+          python3 scripts/test-sign-browser.py
+          python3 scripts/test-release-env.py
+          python3 scripts/test-install-apps.py
+          python3 skills/ccbaga-network/scripts/test_network.py
+          bash -n skills/ccbaga-network/scripts/setup-vps.sh
+          CC_SIGN_IDENTITY=- sh scripts/package-browser.sh
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol
+      - name: Import signing credentials and publishable build
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          CC_SIGN_IDENTITY: ${{ secrets.CC_SIGN_IDENTITY }}
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for variable in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_PRIVATE_KEY APPLE_API_KEY APPLE_API_ISSUER CC_SIGN_IDENTITY TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            test -n "${!variable}" || { echo "Missing GitHub Secret: $variable" >&2; exit 1; }
+          done
+          certificate="$RUNNER_TEMP/cctool-signing.p12"
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/cctool-notary.p8"
+          keychain="$RUNNER_TEMP/cctool-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$APPLE_API_KEY_PATH"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain" >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_PRIVATE_KEY
+          python3 scripts/release-macos.py
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/cctool-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cctool-signing.p12" "$RUNNER_TEMP/cctool-notary.p8"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-${{ github.run_id }}
+          path: |
+            releases/*.dmg
+            releases/*.app.tar.gz
+            releases/*.sig
+            releases/latest.json
+            releases/SHA256SUMS
+            releases/notarization.json
+          if-no-files-found: error
+          retention-days: 14
+  linux:
+    if: github.ref == 'refs/heads/release'
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - name: Prepare Linux tools and pinned engine
+        run: |
+          test "$(uname -m)" = x86_64
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf zsh openssh-client xdg-utils libnss3 libnspr4 libgbm1 libasound2t64 libxss1 libfuse2t64 rpm libarchive-tools
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          bun install --frozen-lockfile
+          python3 scripts/fetch-browser.py
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: src-tauri -> target
+          shared-key: linux-ubuntu24
+          cache-on-failure: true
+      - name: Test, build and verify Linux packages
+        env:
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/release-linux.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: linux-${{ github.run_id }}
+          path: |
+            releases/CCBaga-*-linux-x86_64.deb
+            releases/CCBaga-*-linux-x86_64.rpm
+            releases/CCBaga-*-linux-x86_64.AppImage
+            releases/Linux-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+  arch:
+    if: github.ref == 'refs/heads/release'
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: src-tauri -> target
+          shared-key: linux-arch
+          cache-on-failure: true
+      - name: Native Arch build and package verification
+        env:
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          docker run --rm -e CC_RELEASE_VERSION -e GITHUB_SHA -v "$PWD:/work" -v "$HOME/.cargo:/home/builder/.cargo" -w /work archlinux:base-devel@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd bash scripts/build-arch.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: arch-${{ github.run_id }}
+          path: |
+            releases/CCBaga-*-linux-x86_64.pkg.tar.zst
+            releases/Arch-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: version
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      installer_ready: ${{ steps.windows_build.outcome == 'success' || steps.reuse_installer.outcome == 'success' }}
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - name: Prepare MSVC and native Windows engine
+        if: inputs.installer_run == ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          rustup toolchain install 1.98.1 --profile minimal
+          if($LASTEXITCODE){exit $LASTEXITCODE}
+          rustup default 1.98.1
+          bun install --frozen-lockfile
+          if($LASTEXITCODE){exit $LASTEXITCODE}
+          if(-not (Test-Path "$env:SystemRoot\System32\OpenSSH\ssh.exe")) {
+            Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 | Out-Null
+          }
+          python scripts/fetch-browser.py
+          if($LASTEXITCODE){exit $LASTEXITCODE}
+      - if: inputs.installer_run == ''
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: src-tauri -> target
+          shared-key: windows-msvc
+          cache-on-failure: true
+      - name: Run Windows native, CLI, frontend and Skill checks
+        if: inputs.installer_run == ''
+        env:
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python scripts/release-windows.py check
+      - name: Build current-user Windows installer
+        id: windows_build
+        if: inputs.installer_run == ''
+        env:
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python scripts/release-windows.py build
+      - name: Load the prior unsigned verification installer
+        id: reuse_installer
+        if: inputs.installer_run != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: windows-${{ inputs.installer_run }}
+          run-id: ${{ inputs.installer_run }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: releases
+      - name: Verify real installation and browser observations
+        shell: pwsh
+        run: |
+          $files=@(Get-ChildItem releases/*-setup.exe)
+          if($files.Count -ne 1){throw 'Expected exactly one verification installer'}
+          python scripts/verify-windows-installer.py $files[0].FullName releases/Windows-engine-manifest.json
+          if($LASTEXITCODE){exit $LASTEXITCODE}
+      - name: Sign and verify updater installer
+        if: github.ref == 'refs/heads/release'
+        env:
+          CC_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python scripts/sign-windows-update.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && (steps.windows_build.outcome == 'success' || steps.reuse_installer.outcome == 'success')
+        with:
+          name: windows-${{ github.run_id }}
+          path: |
+            releases/*-setup.exe
+            releases/*.exe.sig
+            releases/latest-windows.json
+            releases/Windows-engine-manifest.json
+            releases/Windows-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+  windows_compat:
+    needs: windows
+    if: always() && needs.windows.outputs.installer_ready == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: windows-${{ github.run_id }}
+          path: releases
+      - name: Verify the same installer on the older Windows runner
+        shell: pwsh
+        run: |
+          $installer=(Get-ChildItem releases/*-setup.exe).FullName
+          python scripts/verify-windows-installer.py $installer releases/Windows-engine-manifest.json
+          if($LASTEXITCODE){exit $LASTEXITCODE}
+  publish:
+    needs: [version, build, linux, arch, windows, windows_compat]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: macos-${{ github.run_id }}
+          path: releases
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: linux-${{ github.run_id }}
+          path: releases
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: arch-${{ github.run_id }}
+          path: releases
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: windows-${{ github.run_id }}
+          path: releases
+      - name: Verify and assemble minimal public assets
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/assemble-release.py
+      - name: Attest public release provenance
+        if: github.event.repository.private == false
+        uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: |
+            releases/*.dmg
+            releases/*.app.tar.gz
+            releases/*.deb
+            releases/*.rpm
+            releases/*.AppImage
+            releases/*.pkg.tar.zst
+            releases/*-setup.exe
+      - name: Create tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ----- 先固定已验收构建的 tag，分支被后续 push 推进也不改变发布来源 -----
+          if existing_sha="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null)"; then
+            test "$existing_sha" = "$RELEASE_COMMIT" || { echo "Release tag belongs to another commit" >&2; exit 1; }
+          else
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_COMMIT" >/dev/null
+          fi
+          mapfile -t assets < release-files.txt
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --verify-tag --title "CCBaga $RELEASE_VERSION" --notes-file release-notes.md --draft
+          gh release edit "$RELEASE_TAG" --draft=false

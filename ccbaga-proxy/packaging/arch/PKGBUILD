@@ -1,0 +1,104 @@
+# [INPUT]: 固定 Git 源码、浏览器哈希与 Arch 构建工具。
+# [OUTPUT]: 本地 pacman 开发包，保留引擎、资源与许可证。
+# [POS]: 社区源码构建配方；官方发布仅属 liseami。
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+# Maintainer: CCBaga contributors
+# Builds the upstream development branch. CCBAGA_GIT_URL / CCBAGA_GIT_REF
+# allow verifying an unmerged checkout without publishing source archives.
+pkgname=ccbaga-git
+pkgver=0.2.0.r0.g0000000
+pkgrel=1
+pkgdesc='Claude maintenance and isolated fingerprint browser toolkit'
+arch=('x86_64')
+url='https://github.com/liseami/CCBaga'
+license=('MIT')
+depends=('gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'nss' 'nspr'
+         'mesa' 'alsa-lib' 'libxss' 'zsh' 'xdg-utils' 'curl')
+makedepends=('bun' 'nodejs' 'rust' 'git' 'pkgconf' 'python' 'cmake' 'openssh')
+optdepends=('wl-clipboard: Wayland clipboard support'
+            'xclip: X11 clipboard support')
+provides=('ccbaga')
+conflicts=('ccbaga')
+# Keep the vendor engine intact; its sandbox and bundled libraries must not
+# be changed by makepkg's automatic ELF strip pass.
+# Cargo owns Rust LTO. makepkg's GCC -flto objects cannot be consumed by
+# Rust's LLVM LTO linker when embedding AWS-LC/ring static archives.
+options=('!strip' '!debug' '!lto')
+_engine_version=148.0.7778.215
+_source_url=${CCBAGA_GIT_URL:-https://github.com/liseami/CCBaga.git}
+_source_ref=${CCBAGA_GIT_REF:-branch=main}
+source=("ccbaga::git+${_source_url}#${_source_ref}"
+        "https://github.com/adryfish/fingerprint-chromium/releases/download/${_engine_version}/ungoogled-chromium-${_engine_version}-1-x86_64_linux.tar.xz")
+sha256sums=('SKIP' '70d239830332e5820aa34dfcb284161cac0429eee25da642830afe04bda717f4')
+
+pkgver() {
+  cd "$srcdir/ccbaga"
+  if [[ -n ${CC_RELEASE_VERSION:-} ]]; then
+    printf '%s' "$CC_RELEASE_VERSION"
+    return
+  fi
+  local version
+  version=$(python -c 'import json; print(json.load(open("package.json"))["version"])')
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/ccbaga"
+  # makepkg verifies the pinned engine digest before extracting it.
+  python - "$srcdir" <<'PY'
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+root = Path(sys.argv[1])
+engines = [p for p in root.glob('*/chrome') if p.parent.name != 'ccbaga']
+if len(engines) != 1:
+    raise SystemExit('Expected one pinned Linux Chromium executable')
+engine = engines[0]
+version = '148.0.7778.215'
+if version not in subprocess.check_output([str(engine), '--version'], text=True):
+    raise SystemExit('Pinned Linux Chromium version mismatch')
+target = Path('browser-runtime/LinuxBrowser')
+if target.exists():
+    shutil.rmtree(target)
+shutil.copytree(engine.parent, target, symlinks=True)
+(target / 'version.txt').write_text(version + '\n')
+PY
+}
+
+build() {
+  cd "$srcdir/ccbaga"
+  bun install --frozen-lockfile
+  # AWS-LC's cc builder caches makepkg CFLAGS before disabling optimization
+  # for jitterentropy. CMake preserves that component's required -O0 flags.
+  local config='{}'
+  if [[ -n ${CC_RELEASE_VERSION:-} ]]; then
+    config=$(python -c 'import json,os; print(json.dumps({"version":os.environ["CC_RELEASE_VERSION"]}))')
+  fi
+  AWS_LC_SYS_CMAKE_BUILDER=1 bun run tauri build --no-bundle --features custom-protocol --config "$config"
+}
+
+check() {
+  cd "$srcdir/ccbaga"
+  bun test
+  bun run test:identities
+  AWS_LC_SYS_CMAKE_BUILDER=1 cargo test --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol
+  python scripts/test-linux.py
+  python skills/ccbaga-network/scripts/test_network.py
+  bash -n skills/ccbaga-network/scripts/setup-vps.sh
+}
+
+package() {
+  cd "$srcdir/ccbaga"
+  local output="${CARGO_TARGET_DIR:-$srcdir/ccbaga/src-tauri/target}/release"
+  install -Dm755 "$output/requirement-french" "$pkgdir/usr/bin/requirement-french"
+  install -d "$pkgdir/usr/lib/CCBaga-A"
+  cp -a "$output/browser-runtime" "$output/browser-ui" "$pkgdir/usr/lib/CCBaga-A/"
+  install -Dm644 packaging/arch/ccbaga-a.desktop "$pkgdir/usr/share/applications/CCBaga-A.desktop"
+  install -Dm644 browser-runtime/ccbaga-browser.desktop "$pkgdir/usr/share/applications/ccbaga-browser.desktop"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/requirement-french.png"
+  install -Dm644 browser-runtime/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/ccbaga-browser.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE.md "$pkgdir/usr/share/licenses/$pkgname/NOTICE.md"
+  install -Dm644 browser-runtime/LICENSE.fingerprint-chromium "$pkgdir/usr/share/licenses/$pkgname/LICENSE.fingerprint-chromium"
+}

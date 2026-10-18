@@ -1,0 +1,13 @@
+# [INPUT]: 本机 pacman 安装的 requirement-french。
+# [OUTPUT]: A 桌面入口。
+# [POS]: 社区开发包的启动声明，不部署服务或修改系统。
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[Desktop Entry]
+Type=Application
+Name=CCBaga-A
+Comment=Claude maintenance and environment toolkit
+Exec=requirement-french
+Icon=requirement-french
+Terminal=false
+Categories=Utility;
+StartupWMClass=requirement-french
