@@ -1,0 +1,7 @@
+# Local artifacts only; each directory keeps its own ignore rules.
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+node_modules/
+.claude/
