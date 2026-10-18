@@ -1,0 +1,14 @@
+* text=auto
+*.py text eol=lf
+*.js text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+# Bytes must match the installed copies; repair compares routing-baseline.js with Clash's
+# script profile byte for byte, so a line-ending change would rewrite Clash's script.
+claude-network/routing-baseline.js -text
+claude-network/repair_jsonc.cjs -text
+claude-network/repair_support.py -text
+claude-network/vendor/** -text
