@@ -10,6 +10,8 @@
 !/Validate-ClaudeAudit.ps1
 !/claude-network/
 !/CodexNetworkGuard/
+!/assets/
+!/assets/**
 
 # Workstation settings, credentials, generated binaries and runtime evidence.
 *.json
