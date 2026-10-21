@@ -1,5 +1,11 @@
 """Local-only helpers for the bounded proxy repair command."""
-import ctypes,ctypes.wintypes as w,hashlib,http.client,io,json,os,pathlib,time
+import ctypes,hashlib,http.client,io,json,os,pathlib,time
+try:
+    import ctypes.wintypes as w
+except ImportError:  # Offline tests import this module off Windows. Win32 calls stay Windows-only.
+    class w:
+        DWORD = ctypes.c_uint32
+        BOOL = ctypes.c_int
 
 class Blob(ctypes.Structure):
     _fields_=[('size',w.DWORD),('data',ctypes.POINTER(ctypes.c_ubyte))]

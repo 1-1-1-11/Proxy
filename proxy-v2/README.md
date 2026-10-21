@@ -1,3 +1,5 @@
+> **公开快照：** 后续开发在 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。本目录只作历史参考。用户名、安装路径、订阅节点名和 Clash 配置 UID 已换成示例，不能按原文部署回原来的电脑。
+
 # Proxy v2：Claude 固定出口
 
 让这台 Windows 电脑上的 Claude 只从固定公网 IP 访问。出口不对就断开，用之前能知道能不能用，出问题时知道怎么恢复；Claude 程序连了哪里，随时能看。
@@ -112,7 +114,7 @@ claude-proxy -Repair                                                        # �
 - **部署**：`-Apply` 先跑上面的验证，不通过就停；被替换和被淘汰的文件备份到 `%USERPROFILE%\.codex\deploy-backups\<时间>`；然后复制新文件，重启守护和仍在启动文件夹里的托盘图标（守护停几秒，期间不核对出口）。不碰 Clash、Clash 配置和 Claude / VS Code 设置。
 - 安装位置不变：`%USERPROFILE%\.codex\ClaudeNetwork`、`%USERPROFILE%\.codex\CodexNetworkGuard`；部署不改桌面快捷方式和开机启动项。
 - 旧项目 `C:\Projects\Proxy` 已归档（标签 `v1-final`），它的部署脚本已停用。
-- 代码托管在私有仓库 https://github.com/example-org/Proxy-v2（远程 `origin`，分支 `main`）。
+- 这份公开副本就是上面的源码。后续开发在 https://github.com/1-1-1-11/CC-Guard 。
 
 ## 仓库之外的系统设置
 
@@ -129,10 +131,12 @@ claude-proxy -Repair                                                        # �
 
 ## 迁移须知
 
+公开快照里的路径、用户名、节点名和 Clash 配置 UID 都是示例，不是原来那台电脑上的值。
+
 | 项目 | 本机约定 |
 | --- | --- |
-| Python | `C:\Tools\Python\python.exe` / `pythonw.exe` 写死在命令入口、C# 启动器和 `guard.ps1` 里 |
-| Clash | Clash Verge Rev（`C:\Tools\ClashVerge`）及其 `verge-mihomo-production-*` 命名管道；修复固定了订阅 / 脚本 UID 和前置节点名；端口 17892（专用）、17893（检查）、7892（日常） |
+| Python | `C:\Tools\Python\python.exe` / `pythonw.exe` 写在命令入口、C# 启动器和 `guard.ps1` 里 |
+| Clash | Clash Verge Rev（示例目录 `C:\Tools\ClashVerge`）及其 `verge-mihomo-production-*` 命名管道；公开快照里的配置 UID 是 `example-profile` / `example-script` / `example-prepend`，前置节点名是 `Example-JP-HY2` 这一组；端口 17892（专用）、17893（检查）、7892（日常） |
 | 固定出口 | 预期 IP 写在 `audit_policy.json`；端口和组名在几个脚本里也写死了 |
 | 用户与路径 | `C:\Users\example`、`C:\Users\example\Desktop`；互斥量名带 `example` |
 | 恢复数据 | 安装目录里的 `repair-baseline.dpapi`（跟随 Windows 用户，不能跨机），不能删 |

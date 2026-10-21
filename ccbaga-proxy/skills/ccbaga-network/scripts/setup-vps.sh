@@ -19,7 +19,7 @@
 # Precedence for every secret: environment variable  >  $STATE_FILE  >  freshly generated.
 #
 # Usage (as root):
-#   HOME_HOST=1.2.3.4 HOME_PORT=1080 HOME_USER=u HOME_PASS=p bash setup-vps.sh
+#   HOME_HOST=203.0.113.4 HOME_PORT=1080 HOME_USER=u HOME_PASS=p bash setup-vps.sh
 #
 # Re-using the current production identity (so existing clients keep working):
 #   XRAY_UUID=... XRAY_PRIVATE_KEY=... XRAY_SHORT_ID=... SUB_TOKEN=... \

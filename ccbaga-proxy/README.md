@@ -1,3 +1,5 @@
+> **公开快照：** 这是 [liseami/CCBaga](https://github.com/liseami/CCBaga)（MIT）的修改副本，不是上游仓库，也不是当前开发线。后续开发在 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。
+
 # CCBaga Proxy — 本机整合开发版
 
 国内使用官方 Claude 账号的环境守护：Claude 只从固定 IP 出去，电脑和指纹浏览器环境跟随这个 IP，多账号互不串。本工作区把 CCBaga 的界面、指纹浏览器和身份管理接到现有 Proxy-v2；仅适配当前 Windows 电脑，固定出口仍由已安装的 Proxy-v2 管理。

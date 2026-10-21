@@ -62,7 +62,9 @@ class GateTests(unittest.TestCase):
     def test_ready_gate_hands_the_url_to_the_fingerprint_browser_entry(self):
         with self.gate('ready'):
             self.assertEqual(entry.launch('https://claude.ai/login')['state'], 'opened')
-        self.assertEqual(self.popen.call_args.args[0], ['C:\\fixture\\requirement-french.exe', '--browser', 'https://claude.ai/login'])
+        launched=self.popen.call_args.args[0]
+        self.assertEqual(launched[0].replace('/','\\'), 'C:\\fixture\\requirement-french.exe')
+        self.assertEqual(launched[1:], ['--browser', 'https://claude.ai/login'])
 
     def test_missing_entry_is_blocked_not_a_fallback_browser(self):
         self.program.return_value = None

@@ -14,7 +14,7 @@
     "dev:install": "python3 scripts/dev-install.py",
     "test:identities": "node --experimental-strip-types scripts/test-identities-ui.ts",
     "test:proxy": "node --experimental-strip-types scripts/test-proxy-ui.ts",
-    "test:bridge": "C:/Tools/Python/python.exe -B -m unittest discover -s proxy-bridge -p test_bridge.py"
+    "test:bridge": "python -B -m unittest discover -s proxy-bridge -p test_bridge.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

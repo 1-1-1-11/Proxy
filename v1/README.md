@@ -1,4 +1,6 @@
-> **已归档（2026-10-12）**：本项目已被 `C:\Projects\Proxy-v2` 取代，安装目录里运行的是 v2。这里只作历史参考；`Deploy-ClaudeAudit.ps1` 和 `Validate-ClaudeAudit.ps1` 已停用，运行会直接报错退出，以免把旧版装回去。最终状态见标签 `v1-final`。
+> **公开快照：** 后续开发在 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。本目录只作历史参考。用户名、安装路径、订阅节点名和 Clash 配置 UID 已换成示例。
+
+> **已归档（2026-10-12）**：本项目已被 Proxy v2 取代，安装目录里运行的是 v2。这里只作历史参考；`Deploy-ClaudeAudit.ps1` 和 `Validate-ClaudeAudit.ps1` 已停用，运行会直接报错退出，以免把旧版装回去。最终状态见标签 `v1-final`。
 
 # Proxy：Claude 固定出口
 
@@ -135,10 +137,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-ClaudeAudit.ps1
 
 ## 迁移须知
 
+公开快照里的路径、用户名、节点名和 Clash 配置 UID 都是示例，不是原来那台电脑上的值。
+
 | 项目 | 本机约定 |
 | --- | --- |
-| Python | `C:\Tools\Python\python.exe` / `pythonw.exe` 写死在命令入口、C# 启动器和 `guard.ps1` 里 |
-| Clash | Clash Verge Rev（`C:\Tools\ClashVerge`）及其 `verge-mihomo-production-*` 命名管道；恢复后端固定了订阅 / 脚本 UID 和前置节点名；端口为 17892（专用）、17893（检查）、7892（日常） |
+| Python | `C:\Tools\Python\python.exe` / `pythonw.exe` 写在命令入口、C# 启动器和 `guard.ps1` 里 |
+| Clash | Clash Verge Rev（示例目录 `C:\Tools\ClashVerge`）及其 `verge-mihomo-production-*` 命名管道；公开快照里的配置 UID 是 `example-profile` / `example-script` / `example-prepend`，前置节点名是 `Example-JP-HY2` 这一组；端口为 17892（专用）、17893（检查）、7892（日常） |
 | 固定出口 | 预期 IP、端口和组名写在 `audit_policy.json`；部分脚本里仍有写死的端口和组名 |
 | 用户与路径 | `C:\Users\example`、`C:\Users\example\Desktop`；守护和图标的互斥量名带 `example` |
 | Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe`，专用资料在 `%LOCALAPPDATA%\ClaudeNetwork\ChromeData` |

@@ -5,3 +5,23 @@ __pycache__/
 *.py[cod]
 node_modules/
 .claude/
+
+# Local configs and secrets. Checked-in examples stay tracked.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+*.dpapi
+audit_policy.json
+repair-baseline.dpapi
+subscription-*.json
+clash-*.yaml
+identity-vault/
+key.bin
+*.baga
+identities.sqlite*
+.venv/

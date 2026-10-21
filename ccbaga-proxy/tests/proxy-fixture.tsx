@@ -44,7 +44,7 @@ mockIPC(async (command, args) => {
   if (command === 'proxy_repair_plan') return {token:'fixture-confirmation',effects:['调用现有 Proxy-v2 修复脚本，可能重启 Clash 和受保护应用。']};
   if (command === 'proxy_protect') { await wait(300); protection = 'protected'; return {action:'protected', report:report()}; }
   if (command === 'proxy_repair') { await wait(400); return {action:'repaired',report:report()}; }
-  if (command === 'proxy_workspace_choose') { workspace = 'D:\\Projects\\demo'; return workspace; }
+  if (command === 'proxy_workspace_choose') { workspace = 'C:\\Projects\\demo'; return workspace; }
   if (command === 'proxy_exit_region') return {country:'US', timezone:'America/Los_Angeles', region:'us-west', label:'美国 · 洛杉矶'};
   if (command === 'proxy_account') return account();
   if (command === 'system_read') return {timezone, location_enabled:false};
