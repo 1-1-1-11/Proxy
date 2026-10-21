@@ -1,3 +1,5 @@
+> **公开快照：** 后续开发在 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。这里只保留 2026-10-17 的整合说明。文中的安装路径是示例，不是原来那台电脑上的路径。
+
 # CCBaga Proxy 本机整合版
 
 Windows 本机版，2026-10-17 核对。定位：国内使用官方 Claude 账号的环境守护——Claude 只从固定 IP 出去，电脑和浏览器环境跟随这个 IP，多账号互不串。CCBaga 提供界面、托盘、指纹浏览器和身份管理；已安装的 Proxy-v2 负责固定出口判断、后台守护和修复。约束见根目录 `CLAUDE.md`。
@@ -33,7 +35,7 @@ Proxy-v2 不可用时按原因提示：找不到安装、版本与整合版不�
 - 适配 `%USERPROFILE%\.codex\ClaudeNetwork` 与 `CodexNetworkGuard`。后端 `check.py` 的 `VERSION` 必须等于 `proxy-bridge/bridge.py` 的 `SUPPORTED_VERSION`（当前 `2026.10.17`）。两边一起改、一起构建、一起部署。
 - 使用这台电脑的 `C:\Tools\Python\python.exe` 及其 psutil；不是面向任意电脑的通用安装器。
 - 固定端口、预期 IP 来自已安装策略；项目里没有代理密码、controller secret 或 repair baseline。
-- Proxy-v2 源码在私有仓库 `example-org/Proxy-v2`；出口判定、守护、修复和跳板顺序都在那里维护。
+- 出口判定、守护、修复和跳板顺序在本仓库的 `proxy-v2/`。整合时的私有工作副本没有放进这个公开仓库。
 - 上游基线 CCBaga `612ddd9`，另挑了 `0a02de8`、`9851e0d`、`4cb4648`（身份归档重构、每身份独占浏览器资料、默认联动）；没有采用它们的文档改动和起始页身份工牌（依赖未挑的 `882564b`）。
 - 原版傻瓜设置、VPS/网络、电脑环境、浏览器环境、自动更新页面及其原生命令已删除；macOS/Linux 平台代码保留未动。
 
@@ -103,4 +105,4 @@ bun run build:windows
 
 ## 代码托管
 
-私有仓库 `example-org/CCBaga-Proxy`（远程名 `private`，分支 `codex/proxy-integration`）；`origin` 指向上游公开仓库 `liseami/CCBaga`，不向它推送。原版 MIT 与第三方引擎许可保留。
+这份树是整合分支 `codex/proxy-integration` 在 `8d2d4bd` 的快照。当时的 `private` 远程指向未公开的工作副本，`origin` 指向上游公开仓库 `liseami/CCBaga`，不向它推送。原版 MIT 与第三方引擎许可保留。后续开发见 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。

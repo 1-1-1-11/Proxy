@@ -2,7 +2,7 @@
 
 此工作区是 `CCBaga Proxy`，定位为「国内使用官方 Claude 账号的环境守护」，Windows 应用标识 `local.proxy.ccbaga`；使用、验证、构建、切换与回退见 `docs/proxy-integration.md`。下文（目录、法则、各契约、macOS/Linux 发布流程）描述上游原版，仅供参考；与本节冲突时以本节和各模块 CLAUDE.md 的「本机整合」段为准。
 
-远程：`private` 是私有仓库 `example-org/CCBaga-Proxy`；`origin` 是上游公开仓库 `liseami/CCBaga`，禁止推送。上游提交按需挑选，不整体合并。
+远程：整合时 `private` 指向一份未随本仓库公开的私有工作副本；`origin` 是上游公开仓库 `liseami/CCBaga`，禁止推送。上游提交按需挑选，不整体合并。
 
 导航只有首页、连接监视、Claude 身份管理。首页 = 固定出口状态、环境一致性栏、启动 Claude（CLI / 桌面客户端 / 网页版）、桌面客户端保护与修复。`proxy-bridge/bridge.py` 调用已安装 Proxy-v2，Rust `fixed_proxy.rs` 只放行白名单动作并处理超时、互斥和一次性修复确认；不会启动第二个网络守护，自动更新关闭、手动更新。
 

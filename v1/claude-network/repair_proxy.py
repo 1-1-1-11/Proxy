@@ -4,7 +4,7 @@ Credentials stay in existing Clash files or Windows DPAPI snapshots. Controller
 operations run in bounded subprocesses, so an unresponsive pipe cannot hang this
 command indefinitely. No account/model request is made.
 """
-import argparse,concurrent.futures,copy,datetime,hashlib,importlib.util,json,os,pathlib,subprocess,sys,time,urllib.parse
+import argparse,concurrent.futures,copy,datetime,hashlib,importlib.util,json,os,pathlib,shutil,subprocess,sys,time,urllib.parse
 import yaml
 from repair_support import Changes,SingleInstance,atomic,protect,raw_api
 from network_check import EXPECTED_IP,checked,probe
@@ -14,9 +14,10 @@ USER=pathlib.Path.home()
 ROOT=USER/'AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev'
 GUARD=USER/'.codex/CodexNetworkGuard'
 NODE=pathlib.Path(r'C:\Program Files\nodejs\node.exe')
-PS=pathlib.Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'
+PS=pathlib.Path(os.environ.get('SystemRoot', r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
 APP=pathlib.Path(r'C:\Tools\ClashVerge\clash-verge.exe')
 CORE=APP.with_name('verge-mihomo.exe')
+# Example Clash Verge ids. A live profile, script and prepend id stays on the workstation.
 PROFILE='example-profile';SCRIPT='example-script';PREPEND='example-prepend'
 PROVIDER='固定出口链路';FIXED='静态出口-自动恢复';DAILY='日常网络-自动恢复'
 FRONTS=['Example-JP-HY2','Example-KR-HY2','Example-SG-A','Example-US-A']
@@ -33,7 +34,14 @@ class RepairError(Exception):
 
 def say(text):print(text,flush=True)
 def run(command,input=None,timeout=20):
-    return subprocess.run([str(x) for x in command],input=input,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=timeout,creationflags=0x08000000)
+    kwargs=dict(input=input,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=timeout)
+    if os.name=='nt':kwargs['creationflags']=0x08000000
+    return subprocess.run([str(x) for x in command],**kwargs)
+def node_bin():
+    # The workstation path wins. CI and other machines can use node on PATH.
+    if NODE.is_file():return NODE
+    found=shutil.which('node')
+    return pathlib.Path(found) if found else NODE
 def ps(script,timeout=20):
     p=run([PS,'-NoLogo','-NoProfile','-NonInteractive','-Command',"[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"+script],timeout=timeout)
     if p.returncode:raise RepairError('Windows 操作未成功；已隐藏可能包含敏感信息的原始输出。')
@@ -47,7 +55,7 @@ def dump_yaml(value):return yaml.safe_dump(value,allow_unicode=True,sort_keys=Fa
 def render(cfg):
     js=(HERE/'routing-baseline.js').read_text(encoding='utf-8')
     runner=js+'\nprocess.stdout.write(JSON.stringify(main(JSON.parse(require("fs").readFileSync(0,"utf8")))));'
-    p=run([NODE,'-e',runner],json.dumps(cfg,ensure_ascii=False))
+    p=run([node_bin(),'-e',runner],json.dumps(cfg,ensure_ascii=False))
     if p.returncode:raise RepairError('固定出口规则生成失败，原始配置内容未输出。')
     return json.loads(p.stdout)
 def safe_node(n):return isinstance(n,dict) and n.get('type')=='socks5' and n.get('server')==EXPECTED_IP and n.get('port')==443 and bool(n.get('username')) and bool(n.get('password'))

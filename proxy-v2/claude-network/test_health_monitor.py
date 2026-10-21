@@ -83,7 +83,7 @@ class AlertTests(unittest.TestCase):
         return state, killed, calls
 
     def test_unprotected_desktop_app_is_closed_without_touching_clash(self):
-        running = [{'pid': 7, 'kind': 'desktop', 'path': 'D:/WindowsApps/Claude_1/app/claude.exe'},
+        running = [{'pid': 7, 'kind': 'desktop', 'path': 'C:/WindowsApps/Claude_1/app/claude.exe'},
                    {'pid': 9, 'kind': 'cli', 'path': 'C:/npm/claude.exe'}]
         state, killed, calls = self.run_observe(running, 'unpinned')
         self.assertEqual(killed, [7])
@@ -97,7 +97,7 @@ class AlertTests(unittest.TestCase):
 
     def test_unverifiable_protection_closes_the_desktop_app(self):
         import check
-        app = mock.Mock(info={'name': 'claude.exe', 'exe': r'D:\WindowsApps\Claude_1\app\claude.exe'}, pid=7)
+        app = mock.Mock(info={'name': 'claude.exe', 'exe': r'C:\WindowsApps\Claude_1\app\claude.exe'}, pid=7)
         cli = mock.Mock(info={'name': 'claude.exe', 'exe': r'C:\npm\claude.exe'}, pid=9)
         state = {}
         with mock.patch.object(monitor, 'api', return_value=(200, {'connections': []})), \

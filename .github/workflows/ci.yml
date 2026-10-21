@@ -1,0 +1,45 @@
+# Syntax and offline Python tests for the historical snapshot.
+# No release job, no signing, and no Tauri or browser-engine build.
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  python:
+    name: Python syntax and offline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r proxy-v2/requirements.txt
+      - name: Public-tree check
+        run: python scripts/check_public_tree.py
+      - name: Syntax check
+        run: python -m compileall -q -f proxy-v2 v1 ccbaga-proxy/proxy-bridge ccbaga-proxy/scripts ccbaga-proxy/skills scripts
+      - name: Prepare example policy
+        run: |
+          cp proxy-v2/claude-network/audit_policy.example.json proxy-v2/claude-network/audit_policy.json
+          cp v1/claude-network/audit_policy.example.json v1/claude-network/audit_policy.json
+      - name: Proxy v2 tests
+        run: python -m unittest discover -s proxy-v2/claude-network -p 'test_*.py'
+      - name: Archived v1 tests
+        run: python -m unittest discover -s v1/claude-network -p 'test_*.py'
+      - name: Proxy bridge tests
+        run: python -m unittest discover -s ccbaga-proxy/proxy-bridge -p 'test_*.py'
+      - name: Network skill tests
+        run: python ccbaga-proxy/skills/ccbaga-network/scripts/test_network.py

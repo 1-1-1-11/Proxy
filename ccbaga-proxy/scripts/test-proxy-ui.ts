@@ -61,7 +61,7 @@ try {
   // CLI folder comes from the native picker and triggers a fresh check for that folder.
   const checks=await count('proxy_check');
   await page.getByRole('button',{name:'更改'}).click();
-  await page.getByText('D:\\Projects\\demo',{exact:true}).waitFor();
+  await page.getByText('C:\\Projects\\demo',{exact:true}).waitFor();
   await page.waitForFunction(before=>(window as any).proxyFixture.commands.filter((r:any)=>r.command==='proxy_check').length>before,checks);
 
   // Launch: summary stays, navigation is not locked, the started entry is named.

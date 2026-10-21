@@ -5,7 +5,7 @@ from repair_support import atomic
 
 HERE=pathlib.Path(__file__).resolve().parent
 CHROME=pathlib.Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
-PROFILE=pathlib.Path(os.environ['LOCALAPPDATA'])/'ClaudeNetwork/ChromeData'
+PROFILE=pathlib.Path(os.environ.get('LOCALAPPDATA', str(pathlib.Path.home() / 'AppData/Local')))/'ClaudeNetwork/ChromeData'
 FLAGS=['--proxy-server=http://127.0.0.1:17892',
        '--proxy-bypass-list=localhost;127.0.0.1;[::1]',
        '--webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-quic',

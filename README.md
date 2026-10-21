@@ -1,98 +1,118 @@
-<!--
-[INPUT]: Proxy v1 (archived), Proxy v2 and CCBaga Proxy as they stood on 2026-10-18, with the checks recorded on 2026-10-17 and 2026-10-18.
-[OUTPUT]: English entry for the repository: what each directory is, how the parts fit together, how to check and build them, and what has not been verified.
-[POS]: Public entry of the repository. Each project keeps its own README and contracts; this file only connects them.
-[PROTOCOL]: Update this header when the layout or a recorded result changes, then check ccbaga-proxy/CLAUDE.md.
--->
 # Proxy
 
-**A fixed exit IP for an official Claude account on one Windows workstation: checks that say whether it holds, a guard that cuts Claude off when it does not, and a desktop app that keeps the browser and the account state consistent with that exit.**
+> **Development continues at [CC-Guard](https://github.com/1-1-1-11/CC-Guard).** This repository is the predecessor and is kept for reference.
+>
+> **后续开发在 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。** 本仓库停在 2026-10-18 前后的公开快照，只供查阅。不要在这里继续加功能，也不要按这里的路径部署到正在使用的电脑上。
 
-中文简介：在国内使用官方 Claude 账号的环境守护。Claude 只从固定 IP 出去，出口不对就断开；电脑和指纹浏览器环境跟随这个出口，多个账号互不串。这是为一台 Windows 工作站定制的工具，不是通用安装包。
+一组 Windows 工作站上的历史工具：让官方 Claude 账号从固定出口出去；出口不对就断开；桌面程序负责浏览器和本机账号状态跟这个出口一致。
 
-## What is in this repository
+这不是通用安装包。公开树里的用户名、安装路径、订阅节点名和 Clash 配置 UID 都已换成示例。
 
-| Path | What it is | Status |
+## 仓库里有什么
+
+| 路径 | 是什么 | 状态 |
 | --- | --- | --- |
-| [`ccbaga-proxy/`](ccbaga-proxy/) | **CCBaga Proxy**: a Tauri desktop app (Rust, React, TypeScript) with a tray, a home page showing the fixed-exit state, a connection monitor, Claude identity management and a fingerprint browser that only starts after the same check passes. Built on upstream [CCBaga](https://github.com/liseami/CCBaga) (MIT). | Current. Copy of branch `codex/proxy-integration` at `8d2d4bd`. |
-| [`proxy-v2/`](proxy-v2/) | **Proxy v2**: the part that does the work on the machine. Routing baseline for Clash Verge, a read-only check, a repair command and a background guard. | Current. Copy of `main` at `3f5f7be`. |
-| [`v1/`](v1/) | **Proxy v1**: the first audit, launcher and repair toolset. | Archived on 2026-10-12 and replaced by Proxy v2. Tag `v1-final` marks its last deployed state. |
+| [`ccbaga-proxy/`](ccbaga-proxy/) | 基于 [CCBaga](https://github.com/liseami/CCBaga)（MIT）改过的 Tauri 桌面程序。快照对应整合分支 `codex/proxy-integration` 的 `8d2d4bd`，不带上游提交历史。 | 历史快照 |
+| [`proxy-v2/`](proxy-v2/) | 本机上的路由基线、只读检查、修复和后台守护。快照对应 `3f5f7be`。 | 历史快照 |
+| [`v1/`](v1/) | 第一版检查和修复工具。2026-10-12 归档。标签 `v1-final` 是最后一次部署时的树。 | 已归档 |
 
-The two current projects are copied here without their commit history; the commits above identify the exact trees. Each directory keeps its own README, tests and licence files, and its relative links only resolve inside it.
+三个目录各自保留 README、测试和许可证。相对链接只在该目录内有效。`ccbaga-proxy/.github/workflows/` 里的上游检查和发布流程不会在本仓库运行，GitHub 只读取仓库根目录的工作流。本仓库不另加发布流程。
 
-## How the parts fit together
+## 各部分怎么接在一起
 
 ```text
-Claude CLI, VS Code, desktop client
-  -> Clash listener 127.0.0.1:17892 (pinned to the "Claude-固定出口" group)
-  -> fixed-exit chain: a front node, then one SOCKS5 exit with a single public IP
-     (the group holds only that chain and REJECT: there is no direct fallback)
+Claude CLI、VS Code、桌面客户端
+  -> Clash 监听 127.0.0.1:17892（钉在「Claude-固定出口」）
+  -> 固定出口链：一个前置节点，再到同一条 SOCKS5 出口
+     （组里只有这条链和 REJECT，没有直连兜底）
 
-Everything else
-  -> Clash TUN and rules: domestic sites DIRECT, the rest through the daily proxy group
+其他流量
+  -> Clash TUN 和规则：国内站点 DIRECT，其余走日常代理组
 
-Proxy v2 guard, about every 30 seconds
-  -> checks the exit IP; a wrong IP switches the protected groups to REJECT and closes their connections
+Proxy v2 守护，大约每 30 秒
+  -> 核对出口；IP 不对就把受保护组切到 REJECT，并断开它们的连接
 
 CCBaga Proxy
-  -> a bridge calls Proxy v2 for the check and the repair (whitelisted actions, version-locked)
-  -> the home page, the tray and the fingerprint-browser gate show and enforce that result
+  -> 桥接调用 Proxy v2 的检查和修复（白名单动作，版本锁定）
+  -> 首页、托盘和指纹浏览器门禁展示并执行这个结果
 ```
 
-- **Routing baseline** (`proxy-v2/claude-network/routing-baseline.js`). Anthropic and Claude domains plus `claude.exe` go to the fixed exit, as do Google and X; OpenAI and Codex use the daily group. Every front node reaches the same exit IP, and the fronts are ordered by measured stability.
-- **Domestic sites.** Since 2026-10-18 the baseline puts `GEOSITE,CN` and GlobalSign's OCSP/CRL hosts on DIRECT, right before the subscription's `GEOIP,CN` and `MATCH` tail. Before that, domestic sites missing from the subscription's short DIRECT list were resolved through the daily proxy, came back with foreign CDN addresses and were dropped by the HY2 front nodes. On the author's machine 13 of 17 sampled domestic sites failed the same `curl.exe` command before the change; afterwards all 17 answered through both the system proxy and the TUN path in 441 of 442 requests (the one failure was not diagnosed).
-- **Version lock.** The `VERSION` in `proxy-v2/claude-network/check.py` must equal `SUPPORTED_VERSION` in `ccbaga-proxy/proxy-bridge/bridge.py` (currently `2026.10.17`). When it changes, both sides are built and deployed together.
-- **Browser gate.** Web sessions and login links open only in CCBaga Proxy's fingerprint browser, which runs its own check first. Its time zone follows the fixed exit and its language is en-US.
+- 路由基线在 `proxy-v2/claude-network/routing-baseline.js`。公开快照里的前置节点名是 `Example-JP-HY2`、`Example-KR-HY2`、`Example-SG-A`、`Example-US-A`。固定出口链把 `Example-KR-HY2` 排在前面。
+- `proxy-v2/claude-network/check.py` 的 `VERSION` 必须等于 `ccbaga-proxy/proxy-bridge/bridge.py` 的 `SUPPORTED_VERSION`（快照里是 `2026.10.17`）。
+- 网页会话和登录链接当时只从 CCBaga Proxy 的指纹浏览器打开。时区跟随固定出口，语言是 en-US。
 
-## Installation
+更细的历史说明在 [`proxy-v2/README.md`](proxy-v2/README.md)、[`v1/README.md`](v1/README.md) 和 [`ccbaga-proxy/docs/proxy-integration.md`](ccbaga-proxy/docs/proxy-integration.md)。
 
-Windows 10 or 11 only, and tied to the original workstation: paths, ports, node names and the recovery logic are hard-coded. Read the migration notes (迁移须知) in [`proxy-v2/README.md`](proxy-v2/README.md) and the integration guide [`ccbaga-proxy/docs/proxy-integration.md`](ccbaga-proxy/docs/proxy-integration.md) before reusing any of it. Both are written in Chinese. What they assume:
+## 环境
 
-- Clash Verge Rev with its service mode and TUN enabled, and a subscription that contains the front nodes and a SOCKS5 exit.
-- Python 3.13 with `psutil` and `PyYAML` (see `proxy-v2/requirements.txt`) and Node.js.
-- Proxy v2 installed under `%USERPROFILE%\.codex\ClaudeNetwork` and `%USERPROFILE%\.codex\CodexNetworkGuard` with `Deploy-Proxy.ps1`; CCBaga Proxy built from `ccbaga-proxy/` with Bun, Rust and the Tauri toolchain.
+看代码和跑离线测试需要：
 
-## Quick start
+- Python 3.11 或更新版本。本仓库 CI 使用 3.13。
+- `psutil` 和 `PyYAML`，版本见 [`proxy-v2/requirements.txt`](proxy-v2/requirements.txt)。v1 的 `requirements.txt` 还列了 playwright，离线测试不启动浏览器，所以 CI 不装它。
+- `node` 在 PATH 上。路由基线测试会调用它。Windows 上若存在 `C:\Program Files\nodejs\node.exe`，修复脚本仍优先用那个路径。
+
+原来那台工作站还假设这些条件。它们不是阅读本仓库的前提：
+
+- Windows 10 或 11，Clash Verge Rev 开着服务模式和 TUN，订阅里有前置节点和一条 SOCKS5 出口。
+- 构建桌面程序时的 Bun、Rust 和 Tauri。
+- 示例路径，不是原电脑上的路径：Python `C:\Tools\Python\python.exe`，Clash `C:\Tools\ClashVerge\clash-verge.exe`，用户 `C:\Users\example`。
+- 安装位置仍按设计写在 `%USERPROFILE%\.codex\ClaudeNetwork` 和 `%USERPROFILE%\.codex\CodexNetworkGuard`。
+
+预期出口只放在本机的 `audit_policy.json`（从 `audit_policy.example.json` 复制）。该文件已被忽略，不要提交。示例地址是 `203.0.113.10`。
+
+## 快速开始
+
+下面两条是原工作站上的用法。公开快照不能直接装回去：
 
 ```powershell
-claude-proxy            # read-only check: can Claude be used right now, and through which exit
-claude-proxy -Repair    # repair the managed Clash configuration, then check again (may restart Clash)
+claude-proxy            # 只读检查
+claude-proxy -Repair    # 修复受管理的 Clash 配置后再检查；可能重启 Clash
 ```
 
-CCBaga Proxy starts in the tray after Windows login. Launch it from Explorer or the startup entry, not from an AI coding terminal, which would hand its environment variables to the CLI it starts. Its three pages are Home, Connection monitor and Claude identities.
+离线测试不连外网，也不读本机 Clash：
 
-## Checks
-
-```powershell
-# Proxy v2, from proxy-v2/
-py -X utf8 -B -m unittest discover -s .\claude-network -p "test_*.py"
-
-# CCBaga Proxy, from ccbaga-proxy/
-bun install --frozen-lockfile
-bun run build
-bun test
-bun run test:bridge
-bun run test:proxy
-bun run test:identities
-cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=4
+```bash
+python -m pip install -r proxy-v2/requirements.txt
+cp proxy-v2/claude-network/audit_policy.example.json proxy-v2/claude-network/audit_policy.json
+cp v1/claude-network/audit_policy.example.json v1/claude-network/audit_policy.json
+python -m unittest discover -s proxy-v2/claude-network -p 'test_*.py'
+python -m unittest discover -s v1/claude-network -p 'test_*.py'
+python -m unittest discover -s ccbaga-proxy/proxy-bridge -p 'test_*.py'
+python ccbaga-proxy/skills/ccbaga-network/scripts/test_network.py
 ```
 
-Recorded results, all on the author's machine:
+桌面程序的 Bun / Cargo 检查写在 [`ccbaga-proxy/README.md`](ccbaga-proxy/README.md)。本仓库 CI 不跑它们。
 
-| Date | Check | Result |
+## 安全
+
+- 这些工具只决定网络出口。本机程序仍能读到时区、系统语言、用户名，以及你授权的文件夹。
+- 守护大约每 30 秒核对一次。出口变了，最多大约 30 秒后才会切断。
+- 普通浏览器里的 claude.ai 只在 Clash 规则模式下走固定出口。网页会话要用当时的指纹浏览器。
+- 不要提交订阅链接、节点密码、`audit_policy.json`、`repair-baseline.dpapi`、私钥或本机 Clash 配置。
+- 公开树已去掉工作站标识。Git 历史里还在，本次没有重写历史。见 [SECURITY.md](SECURITY.md)。
+
+## 验证过什么，没验证过什么
+
+下面是原作者机器上、脱敏之前记下的结果，不是这次 CI 重新跑出来的：
+
+| 日期 | 检查 | 当时的结果 |
 | --- | --- | --- |
-| 2026-10-18 | Proxy v2 offline tests | 67 passed |
-| 2026-10-17 | `bun run build`, `bun test`, `bun run test:bridge`, `bun run test:identities` | type check and build passed; 25, 33 and 19 tests passed |
-| 2026-10-17 | `cargo test` | 77 passed, 3 ignored by design |
+| 2026-10-18 | Proxy v2 离线测试 | 67 项通过 |
+| 2026-10-17 | `bun run build`、`bun test`、`bun run test:bridge`、`bun run test:identities` | 类型检查和构建通过；25、33、19 项通过 |
+| 2026-10-17 | `cargo test` | 77 项通过，3 项按设计忽略 |
 
-## Boundaries
+本仓库 CI 只在 Ubuntu 上做公开树检查、Python 语法检查，以及上一节的离线测试。不构建 Tauri，不签名，不发布。
 
-- The checks describe one moment. The guard re-checks about every 30 seconds, so a changed exit is blocked after at most about 30 seconds.
-- An ordinary browser opening claude.ai goes through the fixed exit only while Clash is in rule mode. Use the fingerprint browser for the web app.
-- The tools decide the network exit. A local client can still read the time zone, system language, user name and the folders you grant it.
-- Not verified: clicking through the web app and login links, identity switching with real accounts, the firewall protection step, a real repair on a broken setup, rebooting, resuming from sleep, long outages, and independent DNS and WebRTC leak tests.
-- No promise about account standing, regional eligibility or a permanent static IP from the supplier.
+没有验证过：网页和登录链接的实际点击、真实账号切换、防火墙保护的实际写入、在坏掉的环境上真的修复、重启、休眠恢复、长时间断网、独立的 DNS 和 WebRTC 泄漏测试。
 
-## License and credits
+不保证账号状态、地区资格，或供应商一直提供同一个静态 IP。
 
-`ccbaga-proxy/` is MIT-licensed (copyright CCBaga contributors, see `ccbaga-proxy/LICENSE`); third-party terms are in `ccbaga-proxy/NOTICE.md`. It builds on [liseami/CCBaga](https://github.com/liseami/CCBaga). `proxy-v2/` and `v1/` ship without a licence file.
+## 许可
+
+Proxy v1、Proxy v2 和本仓库的维护文件以 MIT 许可发布，版权归徐俊毅（GitHub [1-1-1-11](https://github.com/1-1-1-11)），见 [LICENSE](LICENSE)。
+
+`ccbaga-proxy/` 是 [liseami/CCBaga](https://github.com/liseami/CCBaga) 的修改副本，版权归 CCBaga contributors，全文在 [ccbaga-proxy/LICENSE](ccbaga-proxy/LICENSE)。第三方边界和尚未确认的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [ccbaga-proxy/NOTICE.md](ccbaga-proxy/NOTICE.md)。
+
+## 参与
+
+文档、许可和安全清理见 [CONTRIBUTING.md](CONTRIBUTING.md)。新功能请报到 [CC-Guard](https://github.com/1-1-1-11/CC-Guard)。

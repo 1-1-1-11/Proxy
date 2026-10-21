@@ -345,10 +345,11 @@ class Bridge:
             launcher = self.backend.HERE / "claude-fixed.cmd"
             if not launcher.is_file():
                 raise RuntimeError("launcher_missing")
-            shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-            subprocess.Popen([str(shell), "-NoLogo", "-NoProfile", "-NoExit", "-Command", "& $env:CCBAGA_FIXED_CLI"],
-                             cwd=self.workspace, env=os.environ | {"CCBAGA_FIXED_CLI": str(launcher)},
-                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+            shell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            spawned = {"cwd": self.workspace, "env": os.environ | {"CCBAGA_FIXED_CLI": str(launcher)}}
+            if os.name == "nt":
+                spawned["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen([str(shell), "-NoLogo", "-NoProfile", "-NoExit", "-Command", "& $env:CCBAGA_FIXED_CLI"], **spawned)
         else:
             before = set(self.desktops())
             if self.backend.open_desktop(self.workspace) != 0 and not self.started_pinned(before):
